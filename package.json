@@ -1,0 +1,32 @@
+{
+  "name": "hermes-tts",
+  "version": "0.1.0",
+  "description": "Obsidian plugin that turns note text into lightweight audio and prepends timestamped metadata.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs --dev",
+    "build": "node esbuild.config.mjs --prod",
+    "update:versions": "python3 scripts/update_obsidian_versions.py --manifest manifest.json --versions versions.json --record-every-release"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "tts",
+    "audio"
+  ],
+  "author": "Matthias",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-polly": "^3.0.0",
+    "@breezystack/lamejs": "^1.2.7",
+    "@google/genai": "^1.41.0",
+    "@modelcontextprotocol/sdk": "^1.26.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.1.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.5.12",
+    "tslib": "^2.6.3",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,6 +1,5 @@
 import {
   App,
-  FuzzySuggestModal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -13,6 +12,7 @@ import {
   DescribeVoicesCommand,
   PollyClient,
   SynthesizeSpeechCommand,
+  type SynthesizeSpeechCommandInput,
 } from "@aws-sdk/client-polly";
 import { Mp3Encoder } from "@breezystack/lamejs";
 import { GoogleGenAI } from "@google/genai";
@@ -25,6 +25,7 @@ type ProviderId =
   | "elevenlabs"
   | "aws-polly"
   | "openai-compatible";
+type DynamicModelProvider = "openai" | "gemini" | "openai-compatible";
 
 type AwsEngine = "standard" | "neural";
 const METADATA_FIELD_IDS = [
@@ -127,6 +128,36 @@ interface ProviderDocs {
   label: string;
   apiDocsUrl: string;
   voiceDocsUrl: string;
+}
+
+interface OpenAiModelListResponse {
+  data?: Array<{ id?: string }>;
+}
+
+interface GeminiModelListResponse {
+  models?: Array<{
+    name?: string;
+    supportedGenerationMethods?: string[];
+  }>;
+  nextPageToken?: string;
+}
+
+interface WindowWithWebkitAudioContext extends Window {
+  webkitAudioContext?: typeof AudioContext;
+}
+
+interface AwsTransformToByteArray {
+  transformToByteArray: () => Promise<unknown>;
+}
+
+interface AwsReadableStreamLike {
+  getReader: () => {
+    read: () => Promise<{ done: boolean; value?: unknown }>;
+  };
+}
+
+interface AsyncIterableLike {
+  [Symbol.asyncIterator]: () => AsyncIterator<unknown>;
 }
 
 interface ProviderBase {
@@ -380,60 +411,25 @@ const DEFAULT_SETTINGS: NoteTtsAudioSettings = {
   openaiCompatVoice: "alloy",
 };
 
-class MarkdownFileSuggestModal extends FuzzySuggestModal<TFile> {
-  private didSelect = false;
-  private readonly onSelect: (file: TFile | null) => void;
-
-  constructor(app: App, onSelect: (file: TFile | null) => void) {
-    super(app);
-    this.onSelect = onSelect;
-    this.setPlaceholder("Select a markdown note...");
-  }
-
-  getItems(): TFile[] {
-    return this.app.vault.getMarkdownFiles();
-  }
-
-  getItemText(item: TFile): string {
-    return item.path;
-  }
-
-  onChooseItem(item: TFile): void {
-    this.didSelect = true;
-    this.onSelect(item);
-  }
-
-  onClose(): void {
-    super.onClose();
-    if (!this.didSelect) {
-      this.onSelect(null);
-    }
-  }
-}
-
 export default class NoteTtsAudioPlugin extends Plugin {
   settings!: NoteTtsAudioSettings;
+  private readonly modelCache: Partial<Record<DynamicModelProvider, string[]>> = {};
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     this.addCommand({
       id: "generate-current-note-audio",
-      name: "Generate Hermes-TTS audio (current note)",
+      name: "Generate audio for current note",
       callback: async () => {
         await this.generateForActiveNote();
       },
     });
 
-    this.addCommand({
-      id: "generate-picked-note-audio",
-      name: "Generate Hermes-TTS audio (pick note)",
-      callback: async () => {
-        await this.generateForPickedNote();
-      },
-    });
-
-    this.addRibbonIcon("audio-lines", "Generate Hermes-TTS audio", async () => {
+    this.addRibbonIcon("audio-lines", "Generate audio for current note", async () => {
+      if (!this.confirmRibbonGenerateAction()) {
+        return;
+      }
       await this.generateForActiveNote();
     });
 
@@ -508,7 +504,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
   }
 
   private ensureProviderId(provider: unknown): ProviderId {
-    const candidate = String(provider ?? "");
+    const candidate = typeof provider === "string" ? provider : "";
     if (
       candidate === "openai" ||
       candidate === "gemini" ||
@@ -639,6 +635,178 @@ export default class NoteTtsAudioPlugin extends Plugin {
 
   getProviderDocs(provider: ProviderId): ProviderDocs {
     return PROVIDER_DOCS[provider];
+  }
+
+  getCachedProviderModels(provider: DynamicModelProvider): string[] {
+    const cached = this.modelCache[provider];
+    if (cached && cached.length > 0) {
+      return [...cached];
+    }
+
+    switch (provider) {
+      case "openai":
+        return OPENAI_MODELS.map((item) => item.value);
+      case "gemini":
+        return GEMINI_MODELS.map((item) => item.value);
+      case "openai-compatible":
+        return [];
+    }
+  }
+
+  async refreshProviderModels(provider: DynamicModelProvider): Promise<string[]> {
+    let models: string[] = [];
+
+    switch (provider) {
+      case "openai":
+        models = await this.fetchOpenAiLikeModels({
+          apiKey: this.settings.openaiApiKey,
+          baseUrl: "https://api.openai.com/v1",
+          filter: isLikelyOpenAiTtsModel,
+        });
+        break;
+      case "gemini":
+        models = await this.fetchGeminiModels(this.settings.geminiApiKey);
+        break;
+      case "openai-compatible":
+        models = await this.fetchOpenAiLikeModels({
+          apiKey: this.settings.openaiCompatApiKey,
+          baseUrl: this.settings.openaiCompatBaseUrl,
+          allowMissingApiKeyForLocal: true,
+        });
+        break;
+    }
+
+    this.modelCache[provider] = models;
+    return [...models];
+  }
+
+  private async fetchOpenAiLikeModels(input: {
+    apiKey: string;
+    baseUrl: string;
+    allowMissingApiKeyForLocal?: boolean;
+    filter?: (model: string) => boolean;
+  }): Promise<string[]> {
+    const apiKey = input.apiKey.trim();
+    const baseUrl = this.trimTrailingSlash(input.baseUrl.trim());
+
+    if (!baseUrl) {
+      throw new Error("Base URL is required.");
+    }
+    if (!apiKey && !(input.allowMissingApiKeyForLocal && this.isLikelyLocalEndpoint(baseUrl))) {
+      throw new Error("API key is required.");
+    }
+
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    let response;
+    try {
+      response = await requestUrl({
+        url: `${baseUrl}/models`,
+        method: "GET",
+        headers,
+      });
+    } catch (error) {
+      throw new Error(`Model list request failed: ${this.humanizeError(error)}`);
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(this.buildModelListError(response.status, response.json, response.text));
+    }
+
+    const payload = (response.json ?? {}) as OpenAiModelListResponse;
+    const deduped = new Set<string>();
+    for (const item of payload.data ?? []) {
+      const model = item.id?.trim() ?? "";
+      if (!model) {
+        continue;
+      }
+      if (input.filter && !input.filter(model)) {
+        continue;
+      }
+      deduped.add(model);
+    }
+
+    return Array.from(deduped.values()).sort((a, b) => a.localeCompare(b));
+  }
+
+  private async fetchGeminiModels(apiKeyRaw: string): Promise<string[]> {
+    const apiKey = apiKeyRaw.trim();
+    if (!apiKey) {
+      throw new Error("Gemini API key is required.");
+    }
+
+    const collected = new Set<string>();
+    let pageToken = "";
+
+    while (true) {
+      const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
+      if (pageToken) {
+        url.searchParams.set("pageToken", pageToken);
+      }
+
+      let response;
+      try {
+        response = await requestUrl({
+          url: url.toString(),
+          method: "GET",
+          headers: {
+            "x-goog-api-key": apiKey,
+          },
+        });
+      } catch (error) {
+        throw new Error(`Gemini model list request failed: ${this.humanizeError(error)}`);
+      }
+
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(this.buildModelListError(response.status, response.json, response.text));
+      }
+
+      const payload = (response.json ?? {}) as GeminiModelListResponse;
+      for (const modelEntry of payload.models ?? []) {
+        const rawName = modelEntry.name?.trim() ?? "";
+        if (!rawName.startsWith("models/")) {
+          continue;
+        }
+
+        const model = rawName.replace(/^models\//, "");
+        const methods = modelEntry.supportedGenerationMethods ?? [];
+        if (!methods.includes("generateContent")) {
+          continue;
+        }
+        if (!isLikelyGeminiTtsModel(model)) {
+          continue;
+        }
+
+        collected.add(model);
+      }
+
+      if (!payload.nextPageToken) {
+        break;
+      }
+      pageToken = payload.nextPageToken;
+    }
+
+    return Array.from(collected.values()).sort((a, b) => a.localeCompare(b));
+  }
+
+  private buildModelListError(status: number, payload: unknown, rawText?: string): string {
+    const body = (payload ?? {}) as { error?: unknown; message?: unknown };
+    const nestedError =
+      typeof body.error === "string"
+        ? body.error
+        : typeof body.error === "object" && body.error !== null
+          ? (body.error as { message?: unknown }).message
+          : undefined;
+
+    const message =
+      (typeof nestedError === "string" ? nestedError : "") ||
+      (typeof body.message === "string" ? body.message : "") ||
+      (rawText?.trim().slice(0, 300) ?? "");
+
+    return message ? `HTTP ${status}: ${message}` : `HTTP ${status}`;
   }
 
   getFilteredAwsVoiceOptions(): AwsVoiceOption[] {
@@ -871,23 +1039,21 @@ export default class NoteTtsAudioPlugin extends Plugin {
   private async generateForActiveNote(): Promise<void> {
     const activeFile = this.app.workspace.getActiveFile();
     if (!activeFile || activeFile.extension !== "md") {
-      new Notice("Open a markdown note first.");
+      new Notice("Open a Markdown note first.");
       return;
     }
 
     await this.generateForFile(activeFile);
   }
 
-  private async generateForPickedNote(): Promise<void> {
-    const file = await new Promise<TFile | null>((resolve) => {
-      new MarkdownFileSuggestModal(this.app, resolve).open();
-    });
-
-    if (!file) {
-      return;
+  private confirmRibbonGenerateAction(): boolean {
+    if (typeof window === "undefined" || typeof window.confirm !== "function") {
+      return true;
     }
 
-    await this.generateForFile(file);
+    const activeFile = this.app.workspace.getActiveFile();
+    const target = activeFile?.basename ? ` for "${activeFile.basename}"` : "";
+    return window.confirm(`Create a TTS audio file${target}?`);
   }
 
   private async generateForFile(file: TFile): Promise<void> {
@@ -930,7 +1096,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
         .replace(/!\[\[([^\]]+)\]\]/g, "$1")
         .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, "$2")
         .replace(/\[\[([^\]]+)\]\]/g, "$1")
-        .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
         .replace(/^#{1,6}\s+/gm, "")
         .replace(/^>+\s?/gm, "")
         .replace(/^\s*[-*+]\s+/gm, "")
@@ -1195,10 +1361,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
         );
       }
 
-      new Notice("Gemini TTS failed. Retrying with Google Cloud fallback...");
+      new Notice("Gemini tts failed. Retrying with Google cloud fallback...");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
-        new Notice("Google Cloud fallback succeeded.");
+        new Notice("Google cloud fallback succeeded.");
         return { generated, providerUsed: fallbackProvider };
       } catch (fallbackError) {
         throw new Error(
@@ -1528,8 +1694,8 @@ export default class NoteTtsAudioPlugin extends Plugin {
     const locale = this.inferAzureLocaleFromVoice(provider.voice);
 
     const ssml = [
-      `<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"${locale}\">`,
-      `<voice name=\"${provider.voice}\">`,
+      `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${locale}">`,
+      `<voice name="${provider.voice}">`,
       escapedText,
       `</voice>`,
       `</speak>`,
@@ -1621,18 +1787,20 @@ export default class NoteTtsAudioPlugin extends Plugin {
       },
     });
 
+    const input: SynthesizeSpeechCommandInput = {
+      Text: text,
+      OutputFormat: outputFormat,
+      VoiceId: provider.voice as SynthesizeSpeechCommandInput["VoiceId"],
+      Engine: provider.engine,
+      TextType: "text",
+    };
+    if (provider.languageCode) {
+      input.LanguageCode = provider.languageCode as SynthesizeSpeechCommandInput["LanguageCode"];
+    }
+
     let result;
     try {
-      result = await client.send(
-        new SynthesizeSpeechCommand({
-          Text: text,
-          OutputFormat: outputFormat,
-          VoiceId: provider.voice as any,
-          Engine: provider.engine,
-          LanguageCode: (provider.languageCode || undefined) as any,
-          TextType: "text",
-        }),
-      );
+      result = await client.send(new SynthesizeSpeechCommand(input));
     } catch (error) {
       throw new Error(`AWS Polly request failed: ${this.humanizeError(error)}`);
     }
@@ -1672,7 +1840,8 @@ export default class NoteTtsAudioPlugin extends Plugin {
   }
 
   private async decodeAudioBytes(bytes: Uint8Array): Promise<AudioBuffer> {
-    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+    const audioWindow = window as WindowWithWebkitAudioContext;
+    const AudioContextCtor = audioWindow.AudioContext ?? audioWindow.webkitAudioContext;
     if (!AudioContextCtor) {
       throw new Error("Audio conversion to mp3 requires AudioContext support.");
     }
@@ -1903,9 +2072,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
       }
 
       const sentenceParts = paragraph
-        .split(/(?<=[.!?])\s+/)
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0);
+        .match(/[^.!?]+[.!?]*\s*/g)
+        ?.map((part) => part.trim())
+        .filter((part) => part.length > 0) ?? [paragraph]
+        ;
 
       if (!sentenceParts.length) {
         for (let i = 0; i < paragraph.length; i += maxChunkSize) {
@@ -2116,8 +2286,36 @@ export default class NoteTtsAudioPlugin extends Plugin {
       return bytes;
     }
 
-    const buffer = Buffer.from(sanitized, "base64");
-    return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    return this.decodeBase64Portable(sanitized);
+  }
+
+  private decodeBase64Portable(base64: string): Uint8Array {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const clean = base64.replace(/=+$/g, "");
+    if (!clean.length) {
+      return new Uint8Array(0);
+    }
+
+    let buffer = 0;
+    let bits = 0;
+    const out: number[] = [];
+
+    for (let i = 0; i < clean.length; i += 1) {
+      const value = chars.indexOf(clean[i]);
+      if (value < 0) {
+        continue;
+      }
+
+      buffer = (buffer << 6) | value;
+      bits += 6;
+
+      if (bits >= 8) {
+        bits -= 8;
+        out.push((buffer >> bits) & 0xff);
+      }
+    }
+
+    return Uint8Array.from(out);
   }
 
   private escapeXml(value: string): string {
@@ -2125,7 +2323,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/\"/g, "&quot;")
+      .replace(/"/g, "&quot;")
       .replace(/'/g, "&apos;");
   }
 
@@ -2139,11 +2337,11 @@ export default class NoteTtsAudioPlugin extends Plugin {
       return new Uint8Array(0);
     }
 
-    const candidate = stream as any;
+    const candidate = stream;
 
-    if (typeof candidate.transformToByteArray === "function") {
+    if (this.hasTransformToByteArray(candidate)) {
       const bytes = await candidate.transformToByteArray();
-      return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      return this.asUint8Array(bytes);
     }
 
     if (candidate instanceof Uint8Array) {
@@ -2158,7 +2356,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
       return new Uint8Array(candidate.buffer, candidate.byteOffset, candidate.byteLength);
     }
 
-    if (typeof candidate.getReader === "function") {
+    if (this.hasReader(candidate)) {
       const reader = candidate.getReader();
       const chunks: Uint8Array[] = [];
       let totalLength = 0;
@@ -2169,7 +2367,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
           break;
         }
 
-        const chunk = next.value instanceof Uint8Array ? next.value : new Uint8Array(next.value);
+        const chunk = this.asUint8Array(next.value);
+        if (chunk.length === 0) {
+          continue;
+        }
         chunks.push(chunk);
         totalLength += chunk.length;
       }
@@ -2177,24 +2378,12 @@ export default class NoteTtsAudioPlugin extends Plugin {
       return this.concatChunks(chunks, totalLength);
     }
 
-    if (candidate && typeof candidate[Symbol.asyncIterator] === "function") {
+    if (this.isAsyncIterable(candidate)) {
       const chunks: Uint8Array[] = [];
       let totalLength = 0;
 
-      for await (const chunkValue of candidate as AsyncIterable<any>) {
-        const chunk =
-          chunkValue instanceof Uint8Array
-            ? chunkValue
-            : chunkValue instanceof ArrayBuffer
-              ? new Uint8Array(chunkValue)
-              : ArrayBuffer.isView(chunkValue)
-                ? new Uint8Array(
-                    chunkValue.buffer,
-                    chunkValue.byteOffset,
-                    chunkValue.byteLength,
-                  )
-                : new Uint8Array(0);
-
+      for await (const chunkValue of candidate) {
+        const chunk = this.asUint8Array(chunkValue);
         if (chunk.length > 0) {
           chunks.push(chunk);
           totalLength += chunk.length;
@@ -2205,6 +2394,48 @@ export default class NoteTtsAudioPlugin extends Plugin {
     }
 
     throw new Error("Unsupported AWS Polly audio stream type.");
+  }
+
+  private hasTransformToByteArray(value: unknown): value is AwsTransformToByteArray {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "transformToByteArray" in value &&
+      typeof value.transformToByteArray === "function"
+    );
+  }
+
+  private hasReader(value: unknown): value is AwsReadableStreamLike {
+    return typeof value === "object" && value !== null && "getReader" in value && typeof value.getReader === "function";
+  }
+
+  private isAsyncIterable(value: unknown): value is AsyncIterableLike {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      Symbol.asyncIterator in value &&
+      typeof value[Symbol.asyncIterator] === "function"
+    );
+  }
+
+  private asUint8Array(value: unknown): Uint8Array {
+    if (value instanceof Uint8Array) {
+      return value;
+    }
+    if (value instanceof ArrayBuffer) {
+      return new Uint8Array(value);
+    }
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (Array.isArray(value)) {
+      return Uint8Array.from(
+        value
+          .filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry))
+          .map((entry) => Math.max(0, Math.min(255, Math.trunc(entry)))),
+      );
+    }
+    return new Uint8Array(0);
   }
 
   private concatChunks(chunks: Uint8Array[], totalLength: number): Uint8Array {
@@ -2230,6 +2461,8 @@ export default class NoteTtsAudioPlugin extends Plugin {
 
 class NoteTtsAudioSettingTab extends PluginSettingTab {
   plugin: NoteTtsAudioPlugin;
+  private modelRefreshers: Partial<Record<DynamicModelProvider, () => Promise<void>>> = {};
+  private modelRefreshTimers: Partial<Record<DynamicModelProvider, number>> = {};
 
   constructor(app: App, plugin: NoteTtsAudioPlugin) {
     super(app, plugin);
@@ -2237,6 +2470,9 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    this.clearRefreshTimers();
+    this.modelRefreshers = {};
+
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("hermes-tts-setting-tab");
@@ -2251,7 +2487,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       .setDesc("Folder for generated audio files.")
       .addText((text) =>
         text
-          .setPlaceholder("Attachments/TTS Audio")
+          .setPlaceholder("Attachments/tts audio")
           .setValue(this.plugin.settings.audioOutputFolder)
           .onChange(async (value) => {
             this.plugin.settings.audioOutputFolder = value.trim();
@@ -2270,8 +2506,8 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Strip markdown formatting")
-      .setDesc("Removes markdown syntax before sending text to TTS.")
+      .setName("Strip Markdown formatting")
+      .setDesc("Removes Markdown syntax before sending text to tts.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.stripMarkdownFormatting)
@@ -2284,12 +2520,12 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
     this.section("Metadata", "Choose which metadata lines appear in the tts callout.");
     this.displayMetadataSettings(containerEl);
 
-    this.section("Voice Prompt", "Optional speaking-style guidance for supported providers.");
+    this.section("Voice prompt", "Optional speaking-style guidance for supported providers.");
 
     new Setting(containerEl)
       .setName("Voice prompt")
       .setDesc(
-        "Optional speaking-style instructions. Used by Gemini and by OpenAI when model supports instructions (gpt-4o-mini-tts).",
+        "Optional speaking-style instructions. Used by Gemini and by OpenAI when model supports instructions (GPT-4o-mini-tts).",
       )
       .addTextArea((textArea) =>
         textArea
@@ -2301,7 +2537,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
           }),
       );
 
-    this.section("Model Provider", "Configure one provider at a time.");
+    this.section("Model provider", "Configure one provider at a time.");
 
     new Setting(containerEl)
       .setName("Provider")
@@ -2390,29 +2626,29 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   private displayOpenAiSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("OpenAI API key")
-      .setDesc("Get one from https://platform.openai.com/api-keys")
+      .setDesc("Get a key from your OpenAI dashboard.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("sk-...")
+          .setPlaceholder("Example: sk-...")
           .setValue(this.plugin.settings.openaiApiKey)
           .onChange(async (value) => {
             this.plugin.settings.openaiApiKey = value.trim();
             await this.plugin.saveSettings();
+            this.scheduleModelRefresh("openai");
           });
       });
 
-    this.dropdownSetting(
-      containerEl,
-      "Model",
-      "OpenAI TTS model.",
-      OPENAI_MODELS,
-      this.plugin.settings.openaiModel,
-      async (value) => {
+    this.renderModelDropdown(containerEl, {
+      provider: "openai",
+      name: "Model",
+      description: "Choose from the live OpenAI model list (TTS-capable models are prioritized).",
+      getCurrentValue: () => this.plugin.settings.openaiModel,
+      setCurrentValue: async (value) => {
         this.plugin.settings.openaiModel = value;
         await this.plugin.saveSettings();
       },
-    );
+    });
 
     this.dropdownSetting(
       containerEl,
@@ -2430,29 +2666,29 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   private displayGeminiSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Gemini API key")
-      .setDesc("Get one from https://aistudio.google.com/apikey")
+      .setDesc("Get a key from Google AI studio.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("AIza...")
+          .setPlaceholder("Example: AIza...")
           .setValue(this.plugin.settings.geminiApiKey)
           .onChange(async (value) => {
             this.plugin.settings.geminiApiKey = value.trim();
             await this.plugin.saveSettings();
+            this.scheduleModelRefresh("gemini");
           });
       });
 
-    this.dropdownSetting(
-      containerEl,
-      "Model",
-      "Gemini TTS model.",
-      GEMINI_MODELS,
-      this.plugin.settings.geminiModel,
-      async (value) => {
+    this.renderModelDropdown(containerEl, {
+      provider: "gemini",
+      name: "Model",
+      description: "Choose from the live Gemini model list (TTS-capable models are prioritized).",
+      getCurrentValue: () => this.plugin.settings.geminiModel,
+      setCurrentValue: async (value) => {
         this.plugin.settings.geminiModel = value;
         await this.plugin.saveSettings();
       },
-    );
+    });
 
     this.dropdownSetting(
       containerEl,
@@ -2469,12 +2705,12 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayGoogleCloudSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Google Cloud API key")
-      .setDesc("Enable Cloud Text-to-Speech API and use an API key with access.")
+      .setName("Google cloud API key")
+      .setDesc("Enable cloud text-to-speech API and use an API key with access.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("AIza...")
+          .setPlaceholder("Example: AIza...")
           .setValue(this.plugin.settings.googleApiKey)
           .onChange(async (value) => {
             this.plugin.settings.googleApiKey = value.trim();
@@ -2512,7 +2748,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   private displayAzureSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Azure API key")
-      .setDesc("Azure Speech resource key.")
+      .setDesc("Azure speech resource key.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
@@ -2553,12 +2789,12 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayElevenLabsSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("ElevenLabs API key")
-      .setDesc("Get one from https://elevenlabs.io/")
+      .setName("Elevenlabs API key")
+      .setDesc("Get a key from your elevenlabs account.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("xi-...")
+          .setPlaceholder("Example: xi-...")
           .setValue(this.plugin.settings.elevenlabsApiKey)
           .onChange(async (value) => {
             this.plugin.settings.elevenlabsApiKey = value.trim();
@@ -2595,7 +2831,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayAwsPollySettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("AWS region")
+      .setName("Aws region")
       .setDesc("Example: us-east-1")
       .addText((text) =>
         text.setValue(this.plugin.settings.awsRegion).onChange(async (value) => {
@@ -2605,7 +2841,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("AWS access key ID")
+      .setName("Aws access key ID")
       .addText((text) =>
         text.setValue(this.plugin.settings.awsAccessKeyId).onChange(async (value) => {
           this.plugin.settings.awsAccessKeyId = value.trim();
@@ -2614,7 +2850,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("AWS secret access key")
+      .setName("Aws secret access key")
       .addText((text) => {
         text.inputEl.type = "password";
         return text.setValue(this.plugin.settings.awsSecretAccessKey).onChange(async (value) => {
@@ -2624,7 +2860,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("AWS session token")
+      .setName("Aws session token")
       .setDesc("Optional, for temporary credentials.")
       .addText((text) => {
         text.inputEl.type = "password";
@@ -2691,6 +2927,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.openaiCompatApiKey = value.trim();
             await this.plugin.saveSettings();
+            this.scheduleModelRefresh("openai-compatible");
           });
       });
 
@@ -2701,18 +2938,20 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
         text.setValue(this.plugin.settings.openaiCompatBaseUrl).onChange(async (value) => {
           this.plugin.settings.openaiCompatBaseUrl = value.trim();
           await this.plugin.saveSettings();
+          this.scheduleModelRefresh("openai-compatible");
         }),
       );
 
-    new Setting(containerEl)
-      .setName("Model")
-      .setDesc("Model value sent to /audio/speech.")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.openaiCompatModel).onChange(async (value) => {
-          this.plugin.settings.openaiCompatModel = value.trim();
-          await this.plugin.saveSettings();
-        }),
-      );
+    this.renderModelDropdown(containerEl, {
+      provider: "openai-compatible",
+      name: "Model",
+      description: "Choose from the provider's `/models` list.",
+      getCurrentValue: () => this.plugin.settings.openaiCompatModel,
+      setCurrentValue: async (value) => {
+        this.plugin.settings.openaiCompatModel = value;
+        await this.plugin.saveSettings();
+      },
+    });
 
     this.dropdownSetting(
       containerEl,
@@ -2725,6 +2964,184 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       },
     );
+  }
+
+  private renderModelDropdown(
+    containerEl: HTMLElement,
+    config: {
+      provider: DynamicModelProvider;
+      name: string;
+      description: string;
+      getCurrentValue: () => string;
+      setCurrentValue: (value: string) => Promise<void>;
+    },
+  ): void {
+    let dropdownRef: HTMLSelectElement | null = null;
+    const setting = new Setting(containerEl).setName(config.name).setDesc(config.description);
+
+    setting.addDropdown((dropdown) => {
+      dropdownRef = dropdown.selectEl;
+      const cachedModels = this.plugin.getCachedProviderModels(config.provider);
+      this.populateDropdown(dropdown.selectEl, cachedModels, config.getCurrentValue());
+      dropdown.onChange(async (value) => {
+        await config.setCurrentValue(value.trim());
+      });
+    });
+
+    setting.addExtraButton((button) => {
+      button.setIcon("refresh-cw");
+      button.setTooltip("Refresh model list");
+      button.onClick(() => {
+        void this.refreshModelDropdown(config, setting, dropdownRef, true);
+      });
+    });
+
+    this.modelRefreshers[config.provider] = async () => {
+      await this.refreshModelDropdown(config, setting, dropdownRef, false);
+    };
+
+    void this.refreshModelDropdown(config, setting, dropdownRef, false);
+  }
+
+  private async refreshModelDropdown(
+    config: {
+      provider: DynamicModelProvider;
+      name: string;
+      description: string;
+      getCurrentValue: () => string;
+      setCurrentValue: (value: string) => Promise<void>;
+    },
+    setting: Setting,
+    dropdownEl: HTMLSelectElement | null,
+    showNotice: boolean,
+  ): Promise<void> {
+    if (!dropdownEl) {
+      return;
+    }
+
+    const readiness = this.getModelRefreshReadiness(config.provider);
+    if (!readiness.ready) {
+      const cached = this.plugin.getCachedProviderModels(config.provider);
+      this.populateDropdown(dropdownEl, cached, config.getCurrentValue());
+      setting.setDesc(`${config.description} (${readiness.reason})`);
+      return;
+    }
+
+    try {
+      const models = await this.plugin.refreshProviderModels(config.provider);
+      this.populateDropdown(dropdownEl, models, config.getCurrentValue());
+
+      if (!config.getCurrentValue().trim() && models.length > 0) {
+        await config.setCurrentValue(models[0]);
+        this.populateDropdown(dropdownEl, models, config.getCurrentValue());
+      }
+
+      const modelCount = models.length;
+      const suffix = modelCount === 1 ? "model" : "models";
+      setting.setDesc(`${config.description} (${modelCount} ${suffix} loaded)`);
+
+      if (showNotice) {
+        new Notice(`${PROVIDER_LABELS[config.provider]} model list updated.`);
+      }
+    } catch (error) {
+      const cached = this.plugin.getCachedProviderModels(config.provider);
+      this.populateDropdown(dropdownEl, cached, config.getCurrentValue());
+
+      const message = this.humanizeError(error);
+      setting.setDesc(`${config.description} (update failed: ${message})`);
+      if (showNotice) {
+        new Notice(`Model update failed for ${PROVIDER_LABELS[config.provider]}: ${message}`);
+      }
+    }
+  }
+
+  private populateDropdown(
+    dropdownEl: HTMLSelectElement,
+    options: string[],
+    currentValueRaw: string,
+  ): void {
+    const currentValue = currentValueRaw.trim();
+    const unique = new Set<string>();
+
+    if (currentValue) {
+      unique.add(currentValue);
+    }
+    for (const option of options) {
+      const value = option.trim();
+      if (value) {
+        unique.add(value);
+      }
+    }
+
+    while (dropdownEl.options.length > 0) {
+      dropdownEl.remove(0);
+    }
+
+    const allValues = Array.from(unique.values());
+    for (const value of allValues) {
+      const optionEl = document.createElement("option");
+      optionEl.value = value;
+      optionEl.text = value;
+      dropdownEl.appendChild(optionEl);
+    }
+
+    if (allValues.length === 0) {
+      const optionEl = document.createElement("option");
+      optionEl.value = "";
+      optionEl.text = "No models available";
+      dropdownEl.appendChild(optionEl);
+      dropdownEl.value = "";
+      return;
+    }
+
+    dropdownEl.value = currentValue || allValues[0];
+  }
+
+  private scheduleModelRefresh(provider: DynamicModelProvider): void {
+    const existing = this.modelRefreshTimers[provider];
+    if (typeof existing === "number") {
+      window.clearTimeout(existing);
+    }
+
+    this.modelRefreshTimers[provider] = window.setTimeout(() => {
+      void this.modelRefreshers[provider]?.();
+    }, 700);
+  }
+
+  private clearRefreshTimers(): void {
+    for (const timeoutId of Object.values(this.modelRefreshTimers)) {
+      if (typeof timeoutId === "number") {
+        window.clearTimeout(timeoutId);
+      }
+    }
+    this.modelRefreshTimers = {};
+  }
+
+  private getModelRefreshReadiness(provider: DynamicModelProvider): { ready: boolean; reason?: string } {
+    switch (provider) {
+      case "openai":
+        return this.plugin.settings.openaiApiKey.trim()
+          ? { ready: true }
+          : { ready: false, reason: "enter an OpenAI API key to load models" };
+      case "gemini":
+        return this.plugin.settings.geminiApiKey.trim()
+          ? { ready: true }
+          : { ready: false, reason: "enter a Gemini API key to load models" };
+      case "openai-compatible": {
+        const baseUrl = this.plugin.settings.openaiCompatBaseUrl.trim();
+        if (!baseUrl) {
+          return { ready: false, reason: "enter a base URL to load models" };
+        }
+        if (!this.plugin.settings.openaiCompatApiKey.trim() && !this.isLikelyLocalEndpoint(baseUrl)) {
+          return { ready: false, reason: "enter an API key to load models" };
+        }
+        return { ready: true };
+      }
+    }
+  }
+
+  private isLikelyLocalEndpoint(url: string): boolean {
+    return /https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/i.test(url);
   }
 
   private dropdownSetting(
@@ -2797,4 +3214,19 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       heading.setDesc(description);
     }
   }
+}
+
+function isLikelyOpenAiTtsModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return (
+    normalized === "tts-1" ||
+    normalized === "tts-1-hd" ||
+    normalized.includes("-tts") ||
+    normalized.endsWith("/tts")
+  );
+}
+
+function isLikelyGeminiTtsModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return normalized.startsWith("gemini") && normalized.includes("tts") && !normalized.includes("embedding");
 }

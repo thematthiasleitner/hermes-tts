@@ -30,6 +30,13 @@ This plugin now uses an **Aloud-style API link-up** pattern:
 - External accounts and API keys are required for provider usage (OpenAI, Google, Azure, ElevenLabs, AWS, or compatible API).
 - The plugin does not include telemetry or ads.
 
+## Mobile compatibility
+
+- Hermes TTS is configured to load on mobile (`isDesktopOnly: false`).
+- The bundle is built for browser-compatible runtimes to support Obsidian mobile.
+- The plugin avoids regex lookbehind and Node-only `Buffer` usage in runtime paths for broader mobile compatibility.
+- Provider behavior may still vary by service/API/network conditions on mobile devices.
+
 ## Voice dropdown behavior
 
 - OpenAI/Gemini: curated built-in voice dropdowns.
@@ -54,7 +61,6 @@ This plugin now uses an **Aloud-style API link-up** pattern:
 ## Commands
 
 - `Generate Hermes-TTS audio (current note)`
-- `Generate Hermes-TTS audio (pick note)`
 
 ## Provider documentation
 
@@ -103,4 +109,3 @@ Release assets expected by Obsidian:
 - `manifest.json`
 - `main.js`
 - `styles.css`
-# hermes-tts

@@ -29,7 +29,7 @@
 ## D. Policy and submission quality gates
 
 - [x] `manifest.json.description` is concise and policy-aligned.
-- [x] `isDesktopOnly` is set correctly (`true`).
+- [x] `isDesktopOnly` is set correctly (`false`) for cross-platform support.
 - [x] README includes purpose and usage guidance.
 - [x] README includes network/account disclosure for external providers.
 - [ ] Manual self-review against current Obsidian Developer policies completed.

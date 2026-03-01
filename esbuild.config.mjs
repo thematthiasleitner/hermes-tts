@@ -19,7 +19,7 @@ const options = {
   ],
   format: "cjs",
   target: "es2018",
-  platform: "node",
+  platform: "browser",
   sourcemap: prod ? false : "inline",
   banner,
   outfile: "main.js",

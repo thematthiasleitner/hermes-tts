@@ -11,7 +11,7 @@
 
 - Existing workflow in Obsidian: Users write and organize notes, then manually run external TTS tools.
 - Required Obsidian APIs/integration points: Commands, settings tab, vault file read/write, binary file write, suggest modal.
-- Platform constraints (desktop/mobile): Desktop first (`isDesktopOnly: true`) due provider SDK/network usage.
+- Platform constraints (desktop/mobile): Cross-platform target (desktop + mobile) with browser-compatible runtime paths; provider/network behavior may still vary by service.
 - Performance constraints: Must avoid blocking UI; text processing and network call run async.
 
 ## 3. MVP Scope

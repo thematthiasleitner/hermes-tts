@@ -36562,7 +36562,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
           )}`
         );
       }
-      new import_obsidian.Notice("Gemini synthesis failed. Retrying with Google cloud fallback...");
+      new import_obsidian.Notice("Gemini synthesis failed, retrying with cloud fallback.");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
         new import_obsidian.Notice("Google cloud fallback succeeded.");
@@ -37456,7 +37456,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Strip Markdown formatting").setDesc("Removes markdown formatting before text-to-speech synthesis.").addToggle(
+    new import_obsidian.Setting(containerEl).setName("Strip Markdown formatting").setDesc("Removes Markdown formatting before text-to-speech synthesis.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.stripMarkdownFormatting).onChange(async (value) => {
         this.plugin.settings.stripMarkdownFormatting = value;
         await this.plugin.saveSettings();
@@ -37466,7 +37466,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     this.displayMetadataSettings(containerEl);
     this.section("Voice prompt", "Optional speaking-style guidance for supported providers.");
     new import_obsidian.Setting(containerEl).setName("Voice prompt").setDesc(
-      "Optional speaking-style instructions for providers that support voice prompts, such as GPT-4o-mini-tts."
+      "Optional speaking-style instructions for providers that support voice prompts."
     ).addTextArea(
       (textArea) => textArea.setPlaceholder("Calm, warm, and concise with short pauses between sections.").setValue(this.plugin.settings.voicePrompt).onChange(async (value) => {
         this.plugin.settings.voicePrompt = value;
@@ -37603,7 +37603,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Language code for voice selection, such as en-US.").addText(
+    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Language code for voice selection.").addText(
       (text) => text.setValue(this.plugin.settings.googleLanguageCode).onChange(async (value) => {
         this.plugin.settings.googleLanguageCode = value.trim();
         await this.plugin.saveSettings();
@@ -37683,7 +37683,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     });
   }
   displayAwsPollySettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Region").setDesc("Region for your AWS requests, such as us-east-1.").addText(
+    new import_obsidian.Setting(containerEl).setName("Region").setDesc("Region for API requests, such as us-east-1.").addText(
       (text) => text.setValue(this.plugin.settings.awsRegion).onChange(async (value) => {
         this.plugin.settings.awsRegion = value.trim();
         await this.plugin.saveSettings();
@@ -37725,7 +37725,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         this.display();
       }
     );
-    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Optional language code for voice filtering, such as en-US.").addText(
+    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Optional language code for voice filtering.").addText(
       (text) => text.setValue(this.plugin.settings.awsLanguageCode).onChange(async (value) => {
         this.plugin.settings.awsLanguageCode = value.trim();
         await this.plugin.saveSettings();

@@ -1,5 +1,6 @@
 import {
   App,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -426,11 +427,12 @@ export default class NoteTtsAudioPlugin extends Plugin {
       },
     });
 
-    this.addRibbonIcon("audio-lines", "Generate audio for current note", async () => {
-      if (!this.confirmRibbonGenerateAction()) {
-        return;
-      }
-      await this.generateForActiveNote();
+    this.addRibbonIcon("audio-lines", "Generate audio for current note", () => {
+      const activeFile = this.app.workspace.getActiveFile();
+      const target = activeFile?.basename ? ` for "${activeFile.basename}"` : "";
+      new ConfirmModal(this.app, `Create a TTS audio file${target}?`, async () => {
+        await this.generateForActiveNote();
+      }).open();
     });
 
     this.addSettingTab(new NoteTtsAudioSettingTab(this.app, this));
@@ -1046,16 +1048,6 @@ export default class NoteTtsAudioPlugin extends Plugin {
     await this.generateForFile(activeFile);
   }
 
-  private confirmRibbonGenerateAction(): boolean {
-    if (typeof window === "undefined" || typeof window.confirm !== "function") {
-      return true;
-    }
-
-    const activeFile = this.app.workspace.getActiveFile();
-    const target = activeFile?.basename ? ` for "${activeFile.basename}"` : "";
-    return window.confirm(`Create a TTS audio file${target}?`);
-  }
-
   private async generateForFile(file: TFile): Promise<void> {
     try {
       new Notice(`Generating TTS audio for ${file.basename}...`);
@@ -1361,10 +1353,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
         );
       }
 
-      new Notice("Gemini tts failed. Retrying with Google cloud fallback...");
+      new Notice("Gemini TTS failed. Retrying with Google Cloud fallback...");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
-        new Notice("Google cloud fallback succeeded.");
+        new Notice("Google Cloud fallback succeeded.");
         return { generated, providerUsed: fallbackProvider };
       } catch (fallbackError) {
         throw new Error(
@@ -2507,7 +2499,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Strip Markdown formatting")
-      .setDesc("Removes Markdown syntax before sending text to tts.")
+      .setDesc("Removes Markdown syntax before sending text to TTS.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.stripMarkdownFormatting)
@@ -2529,7 +2521,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       )
       .addTextArea((textArea) =>
         textArea
-          .setPlaceholder("Example: Calm, warm, and concise with short pauses between sections.")
+          .setPlaceholder("Calm, warm, and concise with short pauses between sections.")
           .setValue(this.plugin.settings.voicePrompt)
           .onChange(async (value) => {
             this.plugin.settings.voicePrompt = value;
@@ -2630,7 +2622,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("Example: sk-...")
+          .setPlaceholder("sk-...")
           .setValue(this.plugin.settings.openaiApiKey)
           .onChange(async (value) => {
             this.plugin.settings.openaiApiKey = value.trim();
@@ -2666,11 +2658,11 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   private displayGeminiSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Gemini API key")
-      .setDesc("Get a key from Google AI studio.")
+      .setDesc("Get a key from Google AI Studio.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("Example: AIza...")
+          .setPlaceholder("AIza...")
           .setValue(this.plugin.settings.geminiApiKey)
           .onChange(async (value) => {
             this.plugin.settings.geminiApiKey = value.trim();
@@ -2705,12 +2697,12 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayGoogleCloudSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Google cloud API key")
-      .setDesc("Enable cloud text-to-speech API and use an API key with access.")
+      .setName("Google Cloud API key")
+      .setDesc("Enable Cloud Text-to-Speech API and use an API key with access.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("Example: AIza...")
+          .setPlaceholder("AIza...")
           .setValue(this.plugin.settings.googleApiKey)
           .onChange(async (value) => {
             this.plugin.settings.googleApiKey = value.trim();
@@ -2720,7 +2712,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Language code")
-      .setDesc("Example: en-US")
+      .setDesc("BCP-47 language code for voice selection, such as en-US.")
       .addText((text) =>
         text.setValue(this.plugin.settings.googleLanguageCode).onChange(async (value) => {
           this.plugin.settings.googleLanguageCode = value.trim();
@@ -2748,7 +2740,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
   private displayAzureSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Azure API key")
-      .setDesc("Azure speech resource key.")
+      .setDesc("Azure Speech resource key.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
@@ -2762,7 +2754,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Azure region")
-      .setDesc("Example: eastus")
+      .setDesc("Azure region where your Speech resource is deployed, such as eastus.")
       .addText((text) =>
         text.setValue(this.plugin.settings.azureRegion).onChange(async (value) => {
           this.plugin.settings.azureRegion = value.trim();
@@ -2789,12 +2781,12 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayElevenLabsSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Elevenlabs API key")
-      .setDesc("Get a key from your elevenlabs account.")
+      .setName("ElevenLabs API key")
+      .setDesc("Get a key from your ElevenLabs account.")
       .addText((text) => {
         text.inputEl.type = "password";
         return text
-          .setPlaceholder("Example: xi-...")
+          .setPlaceholder("xi-...")
           .setValue(this.plugin.settings.elevenlabsApiKey)
           .onChange(async (value) => {
             this.plugin.settings.elevenlabsApiKey = value.trim();
@@ -2804,7 +2796,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Model ID")
-      .setDesc("Example: eleven_multilingual_v2")
+      .setDesc("ElevenLabs model identifier, such as eleven_multilingual_v2.")
       .addText((text) =>
         text.setValue(this.plugin.settings.elevenlabsModel).onChange(async (value) => {
           this.plugin.settings.elevenlabsModel = value.trim();
@@ -2831,8 +2823,8 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
   private displayAwsPollySettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Aws region")
-      .setDesc("Example: us-east-1")
+      .setName("AWS region")
+      .setDesc("AWS region for Polly requests, such as us-east-1.")
       .addText((text) =>
         text.setValue(this.plugin.settings.awsRegion).onChange(async (value) => {
           this.plugin.settings.awsRegion = value.trim();
@@ -2841,7 +2833,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Aws access key ID")
+      .setName("AWS access key ID")
       .addText((text) =>
         text.setValue(this.plugin.settings.awsAccessKeyId).onChange(async (value) => {
           this.plugin.settings.awsAccessKeyId = value.trim();
@@ -2850,7 +2842,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Aws secret access key")
+      .setName("AWS secret access key")
       .addText((text) => {
         text.inputEl.type = "password";
         return text.setValue(this.plugin.settings.awsSecretAccessKey).onChange(async (value) => {
@@ -2860,7 +2852,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Aws session token")
+      .setName("AWS session token")
       .setDesc("Optional, for temporary credentials.")
       .addText((text) => {
         text.inputEl.type = "password";
@@ -2889,7 +2881,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Language code")
-      .setDesc("Optional, example: en-US")
+      .setDesc("Optional BCP-47 language code for voice filtering, such as en-US.")
       .addText((text) =>
         text.setValue(this.plugin.settings.awsLanguageCode).onChange(async (value) => {
           this.plugin.settings.awsLanguageCode = value.trim();
@@ -2933,7 +2925,7 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("API base URL")
-      .setDesc("Example: https://api.example.com or https://api.example.com/v1")
+      .setDesc("Base URL of your OpenAI-compatible endpoint.")
       .addText((text) =>
         text.setValue(this.plugin.settings.openaiCompatBaseUrl).onChange(async (value) => {
           this.plugin.settings.openaiCompatBaseUrl = value.trim();
@@ -3229,4 +3221,39 @@ function isLikelyOpenAiTtsModel(model: string): boolean {
 function isLikelyGeminiTtsModel(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   return normalized.startsWith("gemini") && normalized.includes("tts") && !normalized.includes("embedding");
+}
+
+class ConfirmModal extends Modal {
+  private readonly message: string;
+  private readonly onConfirm: () => Promise<void>;
+
+  constructor(app: App, message: string, onConfirm: () => Promise<void>) {
+    super(app);
+    this.message = message;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.createEl("p", { text: this.message });
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn.setButtonText("Cancel").onClick(() => {
+          this.close();
+        }),
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Generate")
+          .setCta()
+          .onClick(async () => {
+            this.close();
+            await this.onConfirm();
+          }),
+      );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }

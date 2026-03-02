@@ -35809,11 +35809,12 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
         await this.generateForActiveNote();
       }
     });
-    this.addRibbonIcon("audio-lines", "Generate audio for current note", async () => {
-      if (!this.confirmRibbonGenerateAction()) {
-        return;
-      }
-      await this.generateForActiveNote();
+    this.addRibbonIcon("audio-lines", "Generate audio for current note", () => {
+      const activeFile = this.app.workspace.getActiveFile();
+      const target = (activeFile == null ? void 0 : activeFile.basename) ? ` for "${activeFile.basename}"` : "";
+      new ConfirmModal(this.app, `Create a TTS audio file${target}?`, async () => {
+        await this.generateForActiveNote();
+      }).open();
     });
     this.addSettingTab(new NoteTtsAudioSettingTab(this.app, this));
   }
@@ -36303,14 +36304,6 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     }
     await this.generateForFile(activeFile);
   }
-  confirmRibbonGenerateAction() {
-    if (typeof window === "undefined" || typeof window.confirm !== "function") {
-      return true;
-    }
-    const activeFile = this.app.workspace.getActiveFile();
-    const target = (activeFile == null ? void 0 : activeFile.basename) ? ` for "${activeFile.basename}"` : "";
-    return window.confirm(`Create a TTS audio file${target}?`);
-  }
   async generateForFile(file) {
     try {
       new import_obsidian.Notice(`Generating TTS audio for ${file.basename}...`);
@@ -36569,10 +36562,10 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
           )}`
         );
       }
-      new import_obsidian.Notice("Gemini tts failed. Retrying with Google cloud fallback...");
+      new import_obsidian.Notice("Gemini TTS failed. Retrying with Google Cloud fallback...");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
-        new import_obsidian.Notice("Google cloud fallback succeeded.");
+        new import_obsidian.Notice("Google Cloud fallback succeeded.");
         return { generated, providerUsed: fallbackProvider };
       } catch (fallbackError) {
         throw new Error(
@@ -37463,7 +37456,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Strip Markdown formatting").setDesc("Removes Markdown syntax before sending text to tts.").addToggle(
+    new import_obsidian.Setting(containerEl).setName("Strip Markdown formatting").setDesc("Removes Markdown syntax before sending text to TTS.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.stripMarkdownFormatting).onChange(async (value) => {
         this.plugin.settings.stripMarkdownFormatting = value;
         await this.plugin.saveSettings();
@@ -37475,7 +37468,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Voice prompt").setDesc(
       "Optional speaking-style instructions. Used by Gemini and by OpenAI when model supports instructions (GPT-4o-mini-tts)."
     ).addTextArea(
-      (textArea) => textArea.setPlaceholder("Example: Calm, warm, and concise with short pauses between sections.").setValue(this.plugin.settings.voicePrompt).onChange(async (value) => {
+      (textArea) => textArea.setPlaceholder("Calm, warm, and concise with short pauses between sections.").setValue(this.plugin.settings.voicePrompt).onChange(async (value) => {
         this.plugin.settings.voicePrompt = value;
         await this.plugin.saveSettings();
       })
@@ -37543,7 +37536,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
   displayOpenAiSettings(containerEl) {
     new import_obsidian.Setting(containerEl).setName("OpenAI API key").setDesc("Get a key from your OpenAI dashboard.").addText((text) => {
       text.inputEl.type = "password";
-      return text.setPlaceholder("Example: sk-...").setValue(this.plugin.settings.openaiApiKey).onChange(async (value) => {
+      return text.setPlaceholder("sk-...").setValue(this.plugin.settings.openaiApiKey).onChange(async (value) => {
         this.plugin.settings.openaiApiKey = value.trim();
         await this.plugin.saveSettings();
         this.scheduleModelRefresh("openai");
@@ -37572,9 +37565,9 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     );
   }
   displayGeminiSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Gemini API key").setDesc("Get a key from Google AI studio.").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("Gemini API key").setDesc("Get a key from Google AI Studio.").addText((text) => {
       text.inputEl.type = "password";
-      return text.setPlaceholder("Example: AIza...").setValue(this.plugin.settings.geminiApiKey).onChange(async (value) => {
+      return text.setPlaceholder("AIza...").setValue(this.plugin.settings.geminiApiKey).onChange(async (value) => {
         this.plugin.settings.geminiApiKey = value.trim();
         await this.plugin.saveSettings();
         this.scheduleModelRefresh("gemini");
@@ -37603,14 +37596,14 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     );
   }
   displayGoogleCloudSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Google cloud API key").setDesc("Enable cloud text-to-speech API and use an API key with access.").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("Google Cloud API key").setDesc("Enable Cloud Text-to-Speech API and use an API key with access.").addText((text) => {
       text.inputEl.type = "password";
-      return text.setPlaceholder("Example: AIza...").setValue(this.plugin.settings.googleApiKey).onChange(async (value) => {
+      return text.setPlaceholder("AIza...").setValue(this.plugin.settings.googleApiKey).onChange(async (value) => {
         this.plugin.settings.googleApiKey = value.trim();
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Example: en-US").addText(
+    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("BCP-47 language code for voice selection, such as en-US.").addText(
       (text) => text.setValue(this.plugin.settings.googleLanguageCode).onChange(async (value) => {
         this.plugin.settings.googleLanguageCode = value.trim();
         await this.plugin.saveSettings();
@@ -37632,14 +37625,14 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     });
   }
   displayAzureSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Azure API key").setDesc("Azure speech resource key.").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("Azure API key").setDesc("Azure Speech resource key.").addText((text) => {
       text.inputEl.type = "password";
       return text.setPlaceholder("Azure key").setValue(this.plugin.settings.azureApiKey).onChange(async (value) => {
         this.plugin.settings.azureApiKey = value.trim();
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Azure region").setDesc("Example: eastus").addText(
+    new import_obsidian.Setting(containerEl).setName("Azure region").setDesc("Azure region where your Speech resource is deployed, such as eastus.").addText(
       (text) => text.setValue(this.plugin.settings.azureRegion).onChange(async (value) => {
         this.plugin.settings.azureRegion = value.trim();
         await this.plugin.saveSettings();
@@ -37661,14 +37654,14 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     });
   }
   displayElevenLabsSettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Elevenlabs API key").setDesc("Get a key from your elevenlabs account.").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("ElevenLabs API key").setDesc("Get a key from your ElevenLabs account.").addText((text) => {
       text.inputEl.type = "password";
-      return text.setPlaceholder("Example: xi-...").setValue(this.plugin.settings.elevenlabsApiKey).onChange(async (value) => {
+      return text.setPlaceholder("xi-...").setValue(this.plugin.settings.elevenlabsApiKey).onChange(async (value) => {
         this.plugin.settings.elevenlabsApiKey = value.trim();
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Model ID").setDesc("Example: eleven_multilingual_v2").addText(
+    new import_obsidian.Setting(containerEl).setName("Model ID").setDesc("ElevenLabs model identifier, such as eleven_multilingual_v2.").addText(
       (text) => text.setValue(this.plugin.settings.elevenlabsModel).onChange(async (value) => {
         this.plugin.settings.elevenlabsModel = value.trim();
         await this.plugin.saveSettings();
@@ -37690,26 +37683,26 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     });
   }
   displayAwsPollySettings(containerEl) {
-    new import_obsidian.Setting(containerEl).setName("Aws region").setDesc("Example: us-east-1").addText(
+    new import_obsidian.Setting(containerEl).setName("AWS region").setDesc("AWS region for Polly requests, such as us-east-1.").addText(
       (text) => text.setValue(this.plugin.settings.awsRegion).onChange(async (value) => {
         this.plugin.settings.awsRegion = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Aws access key ID").addText(
+    new import_obsidian.Setting(containerEl).setName("AWS access key ID").addText(
       (text) => text.setValue(this.plugin.settings.awsAccessKeyId).onChange(async (value) => {
         this.plugin.settings.awsAccessKeyId = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Aws secret access key").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("AWS secret access key").addText((text) => {
       text.inputEl.type = "password";
       return text.setValue(this.plugin.settings.awsSecretAccessKey).onChange(async (value) => {
         this.plugin.settings.awsSecretAccessKey = value.trim();
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian.Setting(containerEl).setName("Aws session token").setDesc("Optional, for temporary credentials.").addText((text) => {
+    new import_obsidian.Setting(containerEl).setName("AWS session token").setDesc("Optional, for temporary credentials.").addText((text) => {
       text.inputEl.type = "password";
       return text.setValue(this.plugin.settings.awsSessionToken).onChange(async (value) => {
         this.plugin.settings.awsSessionToken = value.trim();
@@ -37732,7 +37725,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         this.display();
       }
     );
-    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Optional, example: en-US").addText(
+    new import_obsidian.Setting(containerEl).setName("Language code").setDesc("Optional BCP-47 language code for voice filtering, such as en-US.").addText(
       (text) => text.setValue(this.plugin.settings.awsLanguageCode).onChange(async (value) => {
         this.plugin.settings.awsLanguageCode = value.trim();
         await this.plugin.saveSettings();
@@ -37763,7 +37756,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         this.scheduleModelRefresh("openai-compatible");
       });
     });
-    new import_obsidian.Setting(containerEl).setName("API base URL").setDesc("Example: https://api.example.com or https://api.example.com/v1").addText(
+    new import_obsidian.Setting(containerEl).setName("API base URL").setDesc("Base URL of your OpenAI-compatible endpoint.").addText(
       (text) => text.setValue(this.plugin.settings.openaiCompatBaseUrl).onChange(async (value) => {
         this.plugin.settings.openaiCompatBaseUrl = value.trim();
         await this.plugin.saveSettings();
@@ -37977,6 +37970,30 @@ function isLikelyGeminiTtsModel(model) {
   const normalized = model.trim().toLowerCase();
   return normalized.startsWith("gemini") && normalized.includes("tts") && !normalized.includes("embedding");
 }
+var ConfirmModal = class extends import_obsidian.Modal {
+  constructor(app, message, onConfirm) {
+    super(app);
+    this.message = message;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("p", { text: this.message });
+    new import_obsidian.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("Cancel").onClick(() => {
+        this.close();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Generate").setCta().onClick(async () => {
+        this.close();
+        await this.onConfirm();
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 /*! Bundled license information:
 
 @google/genai/dist/web/index.mjs:

@@ -37641,7 +37641,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     summary.setText("Callout metadata fields");
     const inner = details.createDiv();
     inner.createEl("p", {
-      text: "Choose which metadata lines appear in the TTS callout. These are rarely changed after initial setup.",
+      text: "Select the metadata fields shown in each audio callout.",
       cls: "setting-item-description"
     });
     this.displayMetadataSettings(inner);

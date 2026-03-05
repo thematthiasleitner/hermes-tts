@@ -36628,7 +36628,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     return { bytes: mp3Bytes, extension: "mp3", mimeType: "audio/mpeg", model, voice };
   }
   async synthesizeLongOpenAiInput(text, provider) {
-    const chunks = this.splitTextAtSentences(text, 3900);
+    const chunks = this.splitTextAtParagraphs(text, 3900);
     if (!chunks.length) {
       throw new Error("OpenAI request payload is empty after chunking.");
     }
@@ -36780,7 +36780,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     var _a3, _b, _c2;
     const GOOGLE_CHUNK_LIMIT = 4800;
     if (text.length > GOOGLE_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, GOOGLE_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, GOOGLE_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithGoogleCloud(chunk, provider),
@@ -36836,7 +36836,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     var _a3;
     const AZURE_CHUNK_LIMIT = 8e3;
     if (text.length > AZURE_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, AZURE_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, AZURE_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithAzure(chunk, provider),
@@ -36887,7 +36887,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     var _a3;
     const ELEVENLABS_CHUNK_LIMIT = 5e3;
     if (text.length > ELEVENLABS_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, ELEVENLABS_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, ELEVENLABS_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithElevenLabs(chunk, provider),
@@ -36932,7 +36932,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     var _a3;
     const POLLY_CHUNK_LIMIT = 5800;
     if (text.length > POLLY_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, POLLY_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, POLLY_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithAwsPolly(chunk, provider),

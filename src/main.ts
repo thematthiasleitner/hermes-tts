@@ -1460,7 +1460,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
     text: string,
     provider: OpenAiCompatibleProvider,
   ): Promise<GeneratedAudio> {
-    const chunks = this.splitTextAtSentences(text, 3900);
+    const chunks = this.splitTextAtParagraphs(text, 3900);
     if (!chunks.length) {
       throw new Error("OpenAI request payload is empty after chunking.");
     }
@@ -1666,7 +1666,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
   ): Promise<GeneratedAudio> {
     const GOOGLE_CHUNK_LIMIT = 4800;
     if (text.length > GOOGLE_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, GOOGLE_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, GOOGLE_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithGoogleCloud(chunk, provider),
@@ -1728,7 +1728,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
   private async synthesizeWithAzure(text: string, provider: AzureProvider): Promise<GeneratedAudio> {
     const AZURE_CHUNK_LIMIT = 8000;
     if (text.length > AZURE_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, AZURE_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, AZURE_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithAzure(chunk, provider),
@@ -1788,7 +1788,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
   ): Promise<GeneratedAudio> {
     const ELEVENLABS_CHUNK_LIMIT = 5000;
     if (text.length > ELEVENLABS_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, ELEVENLABS_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, ELEVENLABS_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithElevenLabs(chunk, provider),
@@ -1837,7 +1837,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
   private async synthesizeWithAwsPolly(text: string, provider: AwsPollyProvider): Promise<GeneratedAudio> {
     const POLLY_CHUNK_LIMIT = 5800;
     if (text.length > POLLY_CHUNK_LIMIT) {
-      const chunks = this.splitTextAtSentences(text, POLLY_CHUNK_LIMIT);
+      const chunks = this.splitTextAtParagraphs(text, POLLY_CHUNK_LIMIT);
       return this.synthesizeChunkedMp3(
         chunks,
         (chunk) => this.synthesizeWithAwsPolly(chunk, provider),

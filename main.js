@@ -36305,24 +36305,33 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     await this.generateForFile(activeFile);
   }
   async generateForFile(file) {
+    const progressNotice = new import_obsidian.Notice(`Preparing TTS for ${file.basename}\u2026`, 0);
     try {
-      new import_obsidian.Notice(`Generating TTS audio for ${file.basename}...`);
+      progressNotice.setMessage(`Reading ${file.basename}\u2026`);
       const originalContent = await this.app.vault.read(file);
       const preparedText = this.prepareTextForTTS(originalContent);
       if (!preparedText.trim()) {
         throw new Error("The selected note has no readable text after preprocessing.");
       }
+      progressNotice.setMessage("Resolving provider\u2026");
       const provider = this.resolveProvider();
+      progressNotice.setMessage(`Synthesizing via ${provider.displayName}\u2026`);
       const { generated: rawGenerated, providerUsed } = await this.synthesizeWithFallback(
         preparedText,
-        provider
+        provider,
+        progressNotice
       );
+      progressNotice.setMessage("Encoding MP3\u2026");
       const generated = await this.ensureMp3Output(rawGenerated);
+      progressNotice.setMessage("Writing audio file\u2026");
       const audioPath = await this.writeAudioFile(file, generated);
+      progressNotice.setMessage("Updating note\u2026");
       await this.prependMetadataBlock(file, audioPath, providerUsed, generated, preparedText.length);
-      new import_obsidian.Notice(`TTS audio created and linked in ${file.basename}.`);
+      progressNotice.hide();
+      new import_obsidian.Notice(`TTS audio created and linked in ${file.basename}.`, 5e3);
     } catch (error) {
       console.error("[hermes-tts] generation failed", error);
+      progressNotice.hide();
       new import_obsidian.Notice(this.humanizeError(error), 8e3);
     }
   }
@@ -36525,12 +36534,12 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       languageCode
     };
   }
-  async synthesize(text, provider) {
+  async synthesize(text, provider, progressNotice) {
     switch (provider.kind) {
       case "openai-compatible":
         return this.synthesizeWithOpenAiCompatible(text, provider);
       case "gemini":
-        return this.synthesizeWithGemini(text, provider);
+        return this.synthesizeWithGemini(text, provider, progressNotice);
       case "google-cloud":
         return this.synthesizeWithGoogleCloud(text, provider);
       case "azure":
@@ -36542,10 +36551,10 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
         return this.synthesizeWithAwsPolly(text, provider);
     }
   }
-  async synthesizeWithFallback(text, provider) {
+  async synthesizeWithFallback(text, provider, progressNotice) {
     try {
       return {
-        generated: await this.synthesize(text, provider),
+        generated: await this.synthesize(text, provider, progressNotice),
         providerUsed: provider
       };
     } catch (error) {
@@ -36562,10 +36571,10 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
           )}`
         );
       }
-      new import_obsidian.Notice("Gemini synthesis failed, retrying with cloud fallback.");
+      progressNotice == null ? void 0 : progressNotice.setMessage("Gemini failed \u2014 retrying with Google Cloud fallback\u2026");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
-        new import_obsidian.Notice("Google cloud fallback succeeded.");
+        progressNotice == null ? void 0 : progressNotice.setMessage("Google Cloud fallback succeeded.");
         return { generated, providerUsed: fallbackProvider };
       } catch (fallbackError) {
         throw new Error(
@@ -36595,16 +36604,12 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     }
     return this.requestOpenAiCompatibleSpeech(text, provider);
   }
-  async synthesizeLongOpenAiInput(text, provider) {
-    const chunks = this.splitTextForGemini(text, 3900);
-    if (!chunks.length) {
-      throw new Error("OpenAI request payload is empty after chunking.");
-    }
+  async synthesizeChunkedMp3(chunks, synthesizeChunk, model, voice) {
     const monoChunks = [];
     let totalSamples = 0;
     let sampleRate = 44100;
     for (const chunk of chunks) {
-      const generated = await this.requestOpenAiCompatibleSpeech(chunk, provider);
+      const generated = await synthesizeChunk(chunk);
       const mp3 = await this.ensureMp3Output(generated);
       const audioBuffer = await this.decodeAudioBytes(mp3.bytes);
       const mono = this.downmixToMono(audioBuffer);
@@ -36620,13 +36625,19 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     }
     const pcm16 = this.floatToInt16Pcm(merged);
     const mp3Bytes = this.encodeMonoPcm16ToMp3(pcm16, sampleRate, 128);
-    return {
-      bytes: mp3Bytes,
-      extension: "mp3",
-      mimeType: "audio/mpeg",
-      model: provider.model,
-      voice: provider.voice
-    };
+    return { bytes: mp3Bytes, extension: "mp3", mimeType: "audio/mpeg", model, voice };
+  }
+  async synthesizeLongOpenAiInput(text, provider) {
+    const chunks = this.splitTextAtSentences(text, 3900);
+    if (!chunks.length) {
+      throw new Error("OpenAI request payload is empty after chunking.");
+    }
+    return this.synthesizeChunkedMp3(
+      chunks,
+      (chunk) => this.requestOpenAiCompatibleSpeech(chunk, provider),
+      provider.model,
+      provider.voice
+    );
   }
   async requestOpenAiCompatibleSpeech(text, provider) {
     var _a3;
@@ -36669,7 +36680,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
           continue;
         }
         throw new Error(
-          `OpenAI-compatible TTS request failed at ${url} with status ${response.status}: ${(_a3 = response.text) != null ? _a3 : ""}`
+          `OpenAI-compatible TTS failed at ${url}: ${this.parseApiError(response.status, (_a3 = response.text) != null ? _a3 : "")}`
         );
       }
       return {
@@ -36684,7 +36695,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       `OpenAI-compatible TTS request failed. Tried: ${urls.join(", ")}. Results: ${errors.join("; ")}`
     );
   }
-  async synthesizeWithGemini(text, provider) {
+  async synthesizeWithGemini(text, provider, progressNotice) {
     const ai = new GoogleGenAI({ apiKey: provider.apiKey });
     const instructions = this.getVoicePrompt();
     try {
@@ -36702,11 +36713,11 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       if (!this.isGeminiTextInsteadOfAudioError(mapped.message)) {
         throw mapped;
       }
-      const chunks = this.splitTextForGemini(text, 900);
+      const chunks = this.splitTextAtSentences(text, 900);
       if (!chunks.length) {
         throw mapped;
       }
-      new import_obsidian.Notice("Gemini requested stricter transcript format. Retrying with segmented transcript...");
+      progressNotice == null ? void 0 : progressNotice.setMessage("Gemini retrying with segmented transcript\u2026");
       const pcmChunks = [];
       let totalLength = 0;
       let contextBefore = "";
@@ -36768,6 +36779,16 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
   }
   async synthesizeWithGoogleCloud(text, provider) {
     var _a3, _b, _c2;
+    const GOOGLE_CHUNK_LIMIT = 4800;
+    if (text.length > GOOGLE_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, GOOGLE_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithGoogleCloud(chunk, provider),
+        provider.voice,
+        provider.voice
+      );
+    }
     const encoding = "MP3";
     let response;
     try {
@@ -36794,7 +36815,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       throw new Error(`Google Cloud TTS request failed: ${this.humanizeError(error)}`);
     }
     if (response.status >= 400) {
-      throw new Error(`Google Cloud TTS request returned status ${response.status}: ${(_a3 = response.text) != null ? _a3 : ""}`);
+      throw new Error(`Google Cloud TTS failed: ${this.parseApiError(response.status, (_a3 = response.text) != null ? _a3 : "")}`);
     }
     const json = response.json;
     if (!(json == null ? void 0 : json.audioContent)) {
@@ -36814,6 +36835,16 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
   }
   async synthesizeWithAzure(text, provider) {
     var _a3;
+    const AZURE_CHUNK_LIMIT = 8e3;
+    if (text.length > AZURE_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, AZURE_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithAzure(chunk, provider),
+        provider.voice,
+        provider.voice
+      );
+    }
     const outputFormat = "audio-24khz-96kbitrate-mono-mp3";
     const escapedText = this.escapeXml(text);
     const locale = this.inferAzureLocaleFromVoice(provider.voice);
@@ -36841,7 +36872,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       throw new Error(`Azure TTS request failed: ${this.humanizeError(error)}`);
     }
     if (response.status >= 400) {
-      throw new Error(`Azure TTS request returned status ${response.status}: ${(_a3 = response.text) != null ? _a3 : ""}`);
+      throw new Error(`Azure TTS failed: ${this.parseApiError(response.status, (_a3 = response.text) != null ? _a3 : "")}`);
     }
     const extension = outputFormat.includes("mp3") ? "mp3" : "ogg";
     const mimeType = extension === "mp3" ? "audio/mpeg" : "audio/ogg";
@@ -36855,6 +36886,16 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
   }
   async synthesizeWithElevenLabs(text, provider) {
     var _a3;
+    const ELEVENLABS_CHUNK_LIMIT = 5e3;
+    if (text.length > ELEVENLABS_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, ELEVENLABS_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithElevenLabs(chunk, provider),
+        provider.model,
+        provider.voice
+      );
+    }
     const outputFormat = "mp3_44100_128";
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
       provider.voice
@@ -36878,7 +36919,7 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       throw new Error(`ElevenLabs TTS request failed: ${this.humanizeError(error)}`);
     }
     if (response.status >= 400) {
-      throw new Error(`ElevenLabs TTS request returned status ${response.status}: ${(_a3 = response.text) != null ? _a3 : ""}`);
+      throw new Error(`ElevenLabs TTS failed: ${this.parseApiError(response.status, (_a3 = response.text) != null ? _a3 : "")}`);
     }
     return {
       bytes: new Uint8Array(response.arrayBuffer),
@@ -36889,6 +36930,17 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     };
   }
   async synthesizeWithAwsPolly(text, provider) {
+    var _a3;
+    const POLLY_CHUNK_LIMIT = 5800;
+    if (text.length > POLLY_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, POLLY_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithAwsPolly(chunk, provider),
+        provider.model,
+        provider.voice
+      );
+    }
     const outputFormat = "mp3";
     const client = new PollyClient({
       region: provider.region,
@@ -36912,7 +36964,14 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
     try {
       result = await client.send(new SynthesizeSpeechCommand(input));
     } catch (error) {
-      throw new Error(`AWS Polly request failed: ${this.humanizeError(error)}`);
+      const awsName = (_a3 = error == null ? void 0 : error.name) != null ? _a3 : "";
+      if (awsName === "TextLengthExceededException") {
+        throw new Error("AWS Polly: Text is too long for synchronous synthesis. Try a shorter note.");
+      }
+      if (awsName === "ThrottlingException") {
+        throw new Error("AWS Polly: Request throttled \u2014 wait a moment, then try again.");
+      }
+      throw new Error(`AWS Polly failed: ${this.humanizeError(error)}`);
     }
     const bytes = await this.awsStreamToBytes(result.AudioStream);
     if (!bytes.length) {
@@ -37117,7 +37176,7 @@ ${transcript}`);
     const normalized = message.toLowerCase();
     return normalized.includes("model tried to generate text") || normalized.includes("only be used for tts") || normalized.includes("only generate audio");
   }
-  splitTextForGemini(text, maxChunkSize) {
+  splitTextAtSentences(text, maxChunkSize) {
     var _a3, _b;
     const cleaned = text.trim();
     if (!cleaned) {
@@ -37176,11 +37235,21 @@ ${nextChunk}` : nextChunk;
   mapGeminiSdkError(error) {
     const original = this.humanizeError(error);
     const status = this.extractGeminiHttpStatus(original);
-    const message = this.extractGeminiJsonErrorMessage(original) || original;
+    const apiMessage = this.extractGeminiJsonErrorMessage(original) || original;
+    const explanations = {
+      401: "Invalid API key \u2014 check your credentials in Settings.",
+      403: "Access denied \u2014 your key may lack the required permissions.",
+      429: "Rate limit exceeded \u2014 wait a moment, then try again.",
+      413: "Text too long for this provider.",
+      500: "Gemini server error \u2014 try again later.",
+      503: "Gemini service unavailable \u2014 try again later."
+    };
     if (status !== null) {
-      return new Error(`Gemini TTS request failed (${status}): ${message}`);
+      const explanation = explanations[status];
+      const detail = explanation ? `${explanation} ${apiMessage !== original ? apiMessage : ""}`.trim() : apiMessage;
+      return new Error(`Gemini TTS failed (${status}): ${detail}`);
     }
-    return new Error(`Gemini TTS request failed: ${message}`);
+    return new Error(`Gemini TTS failed: ${apiMessage}`);
   }
   extractGeminiHttpStatus(message) {
     var _a3;
@@ -37420,6 +37489,39 @@ ${nextChunk}` : nextChunk;
     }
     return combined;
   }
+  parseApiError(status, body) {
+    const explanations = {
+      401: "Invalid API key \u2014 check your credentials in Settings.",
+      403: "Access denied \u2014 your key may lack the required permissions.",
+      429: "Rate limit exceeded \u2014 wait a moment, then try again.",
+      413: "Text too long for this provider.",
+      500: "Provider server error \u2014 try again later.",
+      503: "Provider service unavailable \u2014 try again later."
+    };
+    let detail = "";
+    if (body.trim().startsWith("{")) {
+      try {
+        const json = JSON.parse(body);
+        const err = json == null ? void 0 : json.error;
+        const openaiMsg = err == null ? void 0 : err.message;
+        if (typeof openaiMsg === "string") detail = openaiMsg.trim();
+        if (!detail) {
+          const d3 = json == null ? void 0 : json.detail;
+          if (typeof d3 === "string") detail = d3.trim();
+          else if (d3 && typeof d3 === "object") {
+            const m3 = d3 == null ? void 0 : d3.message;
+            if (typeof m3 === "string") detail = m3.trim();
+          }
+        }
+      } catch (e3) {
+      }
+    }
+    if (!detail) detail = body.trim().slice(0, 300);
+    const explanation = explanations[status];
+    const prefix = explanation ? `HTTP ${status}: ${explanation}` : `HTTP ${status}`;
+    return detail ? `${prefix}
+${detail}` : prefix;
+  }
   humanizeError(error) {
     if (error instanceof Error && error.message) {
       return error.message;
@@ -37440,16 +37542,7 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("hermes-tts-setting-tab");
-    this.section(
-      "Output",
-      "Generated audio is always saved as mp3. Long notes are handled automatically."
-    );
-    new import_obsidian.Setting(containerEl).setName("Audio output folder").setDesc("Folder for generated audio files.").addText(
-      (text) => text.setPlaceholder("Attachments/tts audio").setValue(this.plugin.settings.audioOutputFolder).onChange(async (value) => {
-        this.plugin.settings.audioOutputFolder = value.trim();
-        await this.plugin.saveSettings();
-      })
-    );
+    this.section("Input processing", "Controls what text is sent to the provider.");
     new import_obsidian.Setting(containerEl).setName("Include frontmatter").setDesc("If disabled, YAML frontmatter is excluded from spoken text.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.includeFrontmatter).onChange(async (value) => {
         this.plugin.settings.includeFrontmatter = value;
@@ -37462,9 +37555,6 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    this.section("Metadata", "Choose which metadata lines appear in the tts callout.");
-    this.displayMetadataSettings(containerEl);
-    this.section("Voice prompt", "Optional speaking-style guidance for supported providers.");
     new import_obsidian.Setting(containerEl).setName("Voice prompt").setDesc(
       "Optional speaking-style instructions for providers that support voice prompts."
     ).addTextArea(
@@ -37473,7 +37563,15 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    this.section("Model provider", "Configure one provider at a time.");
+    this.section("Output", "Generated audio is always saved as MP3. Long notes are split automatically.");
+    new import_obsidian.Setting(containerEl).setName("Audio output folder").setDesc("Folder for generated audio files.").addText(
+      (text) => text.setPlaceholder("Attachments/tts audio").setValue(this.plugin.settings.audioOutputFolder).onChange(async (value) => {
+        this.plugin.settings.audioOutputFolder = value.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    this.displayCollapsibleMetadataSettings(containerEl);
+    this.section("Provider", "Configure one provider at a time.");
     new import_obsidian.Setting(containerEl).setName("Provider").setDesc("Select the provider used for synthesis.").addDropdown(
       (dropdown) => dropdown.addOption("openai", PROVIDER_LABELS.openai).addOption("gemini", PROVIDER_LABELS.gemini).addOption("google-cloud", PROVIDER_LABELS["google-cloud"]).addOption("azure", PROVIDER_LABELS.azure).addOption("elevenlabs", PROVIDER_LABELS.elevenlabs).addOption("aws-polly", PROVIDER_LABELS["aws-polly"]).addOption("openai-compatible", PROVIDER_LABELS["openai-compatible"]).setValue(this.plugin.settings.provider).onChange(async (value) => {
         this.plugin.settings.provider = value;
@@ -37506,6 +37604,17 @@ var NoteTtsAudioSettingTab = class extends import_obsidian.PluginSettingTab {
         this.displayOpenAiCompatibleSettings(containerEl);
         break;
     }
+  }
+  displayCollapsibleMetadataSettings(containerEl) {
+    const details = containerEl.createEl("details");
+    const summary = details.createEl("summary");
+    summary.setText("Callout metadata fields");
+    const inner = details.createDiv();
+    inner.createEl("p", {
+      text: "Choose which metadata lines appear in the TTS callout. These are rarely changed after initial setup.",
+      cls: "setting-item-description"
+    });
+    this.displayMetadataSettings(inner);
   }
   displayMetadataSettings(containerEl) {
     for (const field of METADATA_FIELD_IDS) {

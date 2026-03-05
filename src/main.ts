@@ -1049,27 +1049,39 @@ export default class NoteTtsAudioPlugin extends Plugin {
   }
 
   private async generateForFile(file: TFile): Promise<void> {
+    const progressNotice = new Notice(`Preparing TTS for ${file.basename}…`, 0);
     try {
-      new Notice(`Generating TTS audio for ${file.basename}...`);
-
+      progressNotice.setMessage(`Reading ${file.basename}…`);
       const originalContent = await this.app.vault.read(file);
       const preparedText = this.prepareTextForTTS(originalContent);
       if (!preparedText.trim()) {
         throw new Error("The selected note has no readable text after preprocessing.");
       }
 
+      progressNotice.setMessage("Resolving provider…");
       const provider = this.resolveProvider();
+
+      progressNotice.setMessage(`Synthesizing via ${provider.displayName}…`);
       const { generated: rawGenerated, providerUsed } = await this.synthesizeWithFallback(
         preparedText,
         provider,
+        progressNotice,
       );
+
+      progressNotice.setMessage("Encoding MP3…");
       const generated = await this.ensureMp3Output(rawGenerated);
+
+      progressNotice.setMessage("Writing audio file…");
       const audioPath = await this.writeAudioFile(file, generated);
+
+      progressNotice.setMessage("Updating note…");
       await this.prependMetadataBlock(file, audioPath, providerUsed, generated, preparedText.length);
 
-      new Notice(`TTS audio created and linked in ${file.basename}.`);
+      progressNotice.hide();
+      new Notice(`TTS audio created and linked in ${file.basename}.`, 5000);
     } catch (error) {
       console.error("[hermes-tts] generation failed", error);
+      progressNotice.hide();
       new Notice(this.humanizeError(error), 8000);
     }
   }
@@ -1310,12 +1322,16 @@ export default class NoteTtsAudioPlugin extends Plugin {
     };
   }
 
-  private async synthesize(text: string, provider: ResolvedProvider): Promise<GeneratedAudio> {
+  private async synthesize(
+    text: string,
+    provider: ResolvedProvider,
+    progressNotice?: Notice,
+  ): Promise<GeneratedAudio> {
     switch (provider.kind) {
       case "openai-compatible":
         return this.synthesizeWithOpenAiCompatible(text, provider);
       case "gemini":
-        return this.synthesizeWithGemini(text, provider);
+        return this.synthesizeWithGemini(text, provider, progressNotice);
       case "google-cloud":
         return this.synthesizeWithGoogleCloud(text, provider);
       case "azure":
@@ -1331,10 +1347,11 @@ export default class NoteTtsAudioPlugin extends Plugin {
   private async synthesizeWithFallback(
     text: string,
     provider: ResolvedProvider,
+    progressNotice?: Notice,
   ): Promise<{ generated: GeneratedAudio; providerUsed: ResolvedProvider }> {
     try {
       return {
-        generated: await this.synthesize(text, provider),
+        generated: await this.synthesize(text, provider, progressNotice),
         providerUsed: provider,
       };
     } catch (error) {
@@ -1353,10 +1370,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
         );
       }
 
-      new Notice("Gemini synthesis failed, retrying with cloud fallback.");
+      progressNotice?.setMessage("Gemini failed — retrying with Google Cloud fallback…");
       try {
         const generated = await this.synthesizeWithGoogleCloud(text, fallbackProvider);
-        new Notice("Google cloud fallback succeeded.");
+        progressNotice?.setMessage("Google Cloud fallback succeeded.");
         return { generated, providerUsed: fallbackProvider };
       } catch (fallbackError) {
         throw new Error(
@@ -1406,21 +1423,18 @@ export default class NoteTtsAudioPlugin extends Plugin {
     return this.requestOpenAiCompatibleSpeech(text, provider);
   }
 
-  private async synthesizeLongOpenAiInput(
-    text: string,
-    provider: OpenAiCompatibleProvider,
+  private async synthesizeChunkedMp3(
+    chunks: string[],
+    synthesizeChunk: (chunk: string) => Promise<GeneratedAudio>,
+    model: string,
+    voice: string,
   ): Promise<GeneratedAudio> {
-    const chunks = this.splitTextForGemini(text, 3900);
-    if (!chunks.length) {
-      throw new Error("OpenAI request payload is empty after chunking.");
-    }
-
     const monoChunks: Float32Array[] = [];
     let totalSamples = 0;
     let sampleRate = 44100;
 
     for (const chunk of chunks) {
-      const generated = await this.requestOpenAiCompatibleSpeech(chunk, provider);
+      const generated = await synthesizeChunk(chunk);
       const mp3 = await this.ensureMp3Output(generated);
       const audioBuffer = await this.decodeAudioBytes(mp3.bytes);
       const mono = this.downmixToMono(audioBuffer);
@@ -1439,13 +1453,23 @@ export default class NoteTtsAudioPlugin extends Plugin {
     const pcm16 = this.floatToInt16Pcm(merged);
     const mp3Bytes = this.encodeMonoPcm16ToMp3(pcm16, sampleRate, 128);
 
-    return {
-      bytes: mp3Bytes,
-      extension: "mp3",
-      mimeType: "audio/mpeg",
-      model: provider.model,
-      voice: provider.voice,
-    };
+    return { bytes: mp3Bytes, extension: "mp3", mimeType: "audio/mpeg", model, voice };
+  }
+
+  private async synthesizeLongOpenAiInput(
+    text: string,
+    provider: OpenAiCompatibleProvider,
+  ): Promise<GeneratedAudio> {
+    const chunks = this.splitTextAtSentences(text, 3900);
+    if (!chunks.length) {
+      throw new Error("OpenAI request payload is empty after chunking.");
+    }
+    return this.synthesizeChunkedMp3(
+      chunks,
+      (chunk) => this.requestOpenAiCompatibleSpeech(chunk, provider),
+      provider.model,
+      provider.voice,
+    );
   }
 
   private async requestOpenAiCompatibleSpeech(
@@ -1504,7 +1528,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
           continue;
         }
         throw new Error(
-          `OpenAI-compatible TTS request failed at ${url} with status ${response.status}: ${response.text ?? ""}`,
+          `OpenAI-compatible TTS failed at ${url}: ${this.parseApiError(response.status, response.text ?? "")}`,
         );
       }
 
@@ -1522,7 +1546,11 @@ export default class NoteTtsAudioPlugin extends Plugin {
     );
   }
 
-  private async synthesizeWithGemini(text: string, provider: GeminiProvider): Promise<GeneratedAudio> {
+  private async synthesizeWithGemini(
+    text: string,
+    provider: GeminiProvider,
+    progressNotice?: Notice,
+  ): Promise<GeneratedAudio> {
     const ai = new GoogleGenAI({ apiKey: provider.apiKey });
     const instructions = this.getVoicePrompt();
 
@@ -1542,12 +1570,12 @@ export default class NoteTtsAudioPlugin extends Plugin {
         throw mapped;
       }
 
-      const chunks = this.splitTextForGemini(text, 900);
+      const chunks = this.splitTextAtSentences(text, 900);
       if (!chunks.length) {
         throw mapped;
       }
 
-      new Notice("Gemini requested stricter transcript format. Retrying with segmented transcript...");
+      progressNotice?.setMessage("Gemini retrying with segmented transcript…");
 
       const pcmChunks: Uint8Array[] = [];
       let totalLength = 0;
@@ -1630,6 +1658,17 @@ export default class NoteTtsAudioPlugin extends Plugin {
     text: string,
     provider: GoogleCloudProvider,
   ): Promise<GeneratedAudio> {
+    const GOOGLE_CHUNK_LIMIT = 4800;
+    if (text.length > GOOGLE_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, GOOGLE_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithGoogleCloud(chunk, provider),
+        provider.voice,
+        provider.voice,
+      );
+    }
+
     const encoding = "MP3";
 
     let response;
@@ -1658,7 +1697,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
     }
 
     if (response.status >= 400) {
-      throw new Error(`Google Cloud TTS request returned status ${response.status}: ${response.text ?? ""}`);
+      throw new Error(`Google Cloud TTS failed: ${this.parseApiError(response.status, response.text ?? "")}`);
     }
 
     const json = response.json as { audioContent?: string; error?: { message?: string } };
@@ -1681,6 +1720,17 @@ export default class NoteTtsAudioPlugin extends Plugin {
   }
 
   private async synthesizeWithAzure(text: string, provider: AzureProvider): Promise<GeneratedAudio> {
+    const AZURE_CHUNK_LIMIT = 8000;
+    if (text.length > AZURE_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, AZURE_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithAzure(chunk, provider),
+        provider.voice,
+        provider.voice,
+      );
+    }
+
     const outputFormat = "audio-24khz-96kbitrate-mono-mp3";
     const escapedText = this.escapeXml(text);
     const locale = this.inferAzureLocaleFromVoice(provider.voice);
@@ -1711,7 +1761,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
     }
 
     if (response.status >= 400) {
-      throw new Error(`Azure TTS request returned status ${response.status}: ${response.text ?? ""}`);
+      throw new Error(`Azure TTS failed: ${this.parseApiError(response.status, response.text ?? "")}`);
     }
 
     const extension = outputFormat.includes("mp3") ? "mp3" : "ogg";
@@ -1730,6 +1780,17 @@ export default class NoteTtsAudioPlugin extends Plugin {
     text: string,
     provider: ElevenLabsProvider,
   ): Promise<GeneratedAudio> {
+    const ELEVENLABS_CHUNK_LIMIT = 5000;
+    if (text.length > ELEVENLABS_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, ELEVENLABS_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithElevenLabs(chunk, provider),
+        provider.model,
+        provider.voice,
+      );
+    }
+
     const outputFormat = "mp3_44100_128";
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
       provider.voice,
@@ -1755,7 +1816,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
     }
 
     if (response.status >= 400) {
-      throw new Error(`ElevenLabs TTS request returned status ${response.status}: ${response.text ?? ""}`);
+      throw new Error(`ElevenLabs TTS failed: ${this.parseApiError(response.status, response.text ?? "")}`);
     }
 
     return {
@@ -1768,6 +1829,17 @@ export default class NoteTtsAudioPlugin extends Plugin {
   }
 
   private async synthesizeWithAwsPolly(text: string, provider: AwsPollyProvider): Promise<GeneratedAudio> {
+    const POLLY_CHUNK_LIMIT = 5800;
+    if (text.length > POLLY_CHUNK_LIMIT) {
+      const chunks = this.splitTextAtSentences(text, POLLY_CHUNK_LIMIT);
+      return this.synthesizeChunkedMp3(
+        chunks,
+        (chunk) => this.synthesizeWithAwsPolly(chunk, provider),
+        provider.model,
+        provider.voice,
+      );
+    }
+
     const outputFormat = "mp3";
 
     const client = new PollyClient({
@@ -1794,7 +1866,14 @@ export default class NoteTtsAudioPlugin extends Plugin {
     try {
       result = await client.send(new SynthesizeSpeechCommand(input));
     } catch (error) {
-      throw new Error(`AWS Polly request failed: ${this.humanizeError(error)}`);
+      const awsName = (error as { name?: string })?.name ?? "";
+      if (awsName === "TextLengthExceededException") {
+        throw new Error("AWS Polly: Text is too long for synchronous synthesis. Try a shorter note.");
+      }
+      if (awsName === "ThrottlingException") {
+        throw new Error("AWS Polly: Request throttled — wait a moment, then try again.");
+      }
+      throw new Error(`AWS Polly failed: ${this.humanizeError(error)}`);
     }
 
     const bytes = await this.awsStreamToBytes(result.AudioStream);
@@ -2045,7 +2124,7 @@ export default class NoteTtsAudioPlugin extends Plugin {
     );
   }
 
-  private splitTextForGemini(text: string, maxChunkSize: number): string[] {
+  private splitTextAtSentences(text: string, maxChunkSize: number): string[] {
     const cleaned = text.trim();
     if (!cleaned) {
       return [];
@@ -2119,13 +2198,24 @@ export default class NoteTtsAudioPlugin extends Plugin {
   private mapGeminiSdkError(error: unknown): Error {
     const original = this.humanizeError(error);
     const status = this.extractGeminiHttpStatus(original);
-    const message = this.extractGeminiJsonErrorMessage(original) || original;
+    const apiMessage = this.extractGeminiJsonErrorMessage(original) || original;
+
+    const explanations: Record<number, string> = {
+      401: "Invalid API key — check your credentials in Settings.",
+      403: "Access denied — your key may lack the required permissions.",
+      429: "Rate limit exceeded — wait a moment, then try again.",
+      413: "Text too long for this provider.",
+      500: "Gemini server error — try again later.",
+      503: "Gemini service unavailable — try again later.",
+    };
 
     if (status !== null) {
-      return new Error(`Gemini TTS request failed (${status}): ${message}`);
+      const explanation = explanations[status];
+      const detail = explanation ? `${explanation} ${apiMessage !== original ? apiMessage : ""}`.trim() : apiMessage;
+      return new Error(`Gemini TTS failed (${status}): ${detail}`);
     }
 
-    return new Error(`Gemini TTS request failed: ${message}`);
+    return new Error(`Gemini TTS failed: ${apiMessage}`);
   }
 
   private extractGeminiHttpStatus(message: string): number | null {
@@ -2442,6 +2532,38 @@ export default class NoteTtsAudioPlugin extends Plugin {
     return combined;
   }
 
+  private parseApiError(status: number, body: string): string {
+    const explanations: Record<number, string> = {
+      401: "Invalid API key — check your credentials in Settings.",
+      403: "Access denied — your key may lack the required permissions.",
+      429: "Rate limit exceeded — wait a moment, then try again.",
+      413: "Text too long for this provider.",
+      500: "Provider server error — try again later.",
+      503: "Provider service unavailable — try again later.",
+    };
+    let detail = "";
+    if (body.trim().startsWith("{")) {
+      try {
+        const json = JSON.parse(body) as Record<string, unknown>;
+        const err = json?.error as Record<string, unknown> | undefined;
+        const openaiMsg = err?.message;
+        if (typeof openaiMsg === "string") detail = openaiMsg.trim();
+        if (!detail) {
+          const d = json?.detail;
+          if (typeof d === "string") detail = d.trim();
+          else if (d && typeof d === "object") {
+            const m = (d as Record<string, unknown>)?.message;
+            if (typeof m === "string") detail = m.trim();
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    if (!detail) detail = body.trim().slice(0, 300);
+    const explanation = explanations[status];
+    const prefix = explanation ? `HTTP ${status}: ${explanation}` : `HTTP ${status}`;
+    return detail ? `${prefix}\n${detail}` : prefix;
+  }
+
   private humanizeError(error: unknown): string {
     if (error instanceof Error && error.message) {
       return error.message;
@@ -2469,23 +2591,8 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("hermes-tts-setting-tab");
 
-    this.section(
-      "Output",
-      "Generated audio is always saved as mp3. Long notes are handled automatically.",
-    );
-
-    new Setting(containerEl)
-      .setName("Audio output folder")
-      .setDesc("Folder for generated audio files.")
-      .addText((text) =>
-        text
-          .setPlaceholder("Attachments/tts audio")
-          .setValue(this.plugin.settings.audioOutputFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.audioOutputFolder = value.trim();
-            await this.plugin.saveSettings();
-          }),
-      );
+    // ── Input processing ──────────────────────────────────────────────────
+    this.section("Input processing", "Controls what text is sent to the provider.");
 
     new Setting(containerEl)
       .setName("Include frontmatter")
@@ -2509,11 +2616,6 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
           }),
       );
 
-    this.section("Metadata", "Choose which metadata lines appear in the tts callout.");
-    this.displayMetadataSettings(containerEl);
-
-    this.section("Voice prompt", "Optional speaking-style guidance for supported providers.");
-
     new Setting(containerEl)
       .setName("Voice prompt")
       .setDesc(
@@ -2529,7 +2631,26 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
           }),
       );
 
-    this.section("Model provider", "Configure one provider at a time.");
+    // ── Output ────────────────────────────────────────────────────────────
+    this.section("Output", "Generated audio is always saved as MP3. Long notes are split automatically.");
+
+    new Setting(containerEl)
+      .setName("Audio output folder")
+      .setDesc("Folder for generated audio files.")
+      .addText((text) =>
+        text
+          .setPlaceholder("Attachments/tts audio")
+          .setValue(this.plugin.settings.audioOutputFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.audioOutputFolder = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    this.displayCollapsibleMetadataSettings(containerEl);
+
+    // ── Provider ──────────────────────────────────────────────────────────
+    this.section("Provider", "Configure one provider at a time.");
 
     new Setting(containerEl)
       .setName("Provider")
@@ -2577,6 +2698,18 @@ class NoteTtsAudioSettingTab extends PluginSettingTab {
         this.displayOpenAiCompatibleSettings(containerEl);
         break;
     }
+  }
+
+  private displayCollapsibleMetadataSettings(containerEl: HTMLElement): void {
+    const details = containerEl.createEl("details");
+    const summary = details.createEl("summary");
+    summary.setText("Callout metadata fields");
+    const inner = details.createDiv();
+    inner.createEl("p", {
+      text: "Choose which metadata lines appear in the TTS callout. These are rarely changed after initial setup.",
+      cls: "setting-item-description",
+    });
+    this.displayMetadataSettings(inner);
   }
 
   private displayMetadataSettings(containerEl: HTMLElement): void {

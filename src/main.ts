@@ -1554,6 +1554,11 @@ export default class NoteTtsAudioPlugin extends Plugin {
     const ai = new GoogleGenAI({ apiKey: provider.apiKey });
     const instructions = this.getVoicePrompt();
 
+    const GEMINI_CHUNK_LIMIT = 5000;
+    if (text.length > GEMINI_CHUNK_LIMIT) {
+      return this.synthesizeWithGeminiChunked(text, ai, provider, instructions, progressNotice);
+    }
+
     try {
       const pcmBytes = await this.requestGeminiPcm(ai, provider, text, instructions);
       const wavBytes = this.wrapPcm16AsWav(pcmBytes, 24000, 1, 16);
@@ -1566,51 +1571,52 @@ export default class NoteTtsAudioPlugin extends Plugin {
       };
     } catch (error) {
       const mapped = this.mapGeminiSdkError(error);
-      if (!this.isGeminiTextInsteadOfAudioError(mapped.message)) {
-        throw mapped;
-      }
-
-      const chunks = this.splitTextAtSentences(text, 900);
-      if (!chunks.length) {
-        throw mapped;
-      }
+      const shouldChunk =
+        this.isGeminiTextInsteadOfAudioError(mapped.message) ||
+        this.isGeminiMissingAudioError(mapped.message);
+      if (!shouldChunk) throw mapped;
 
       progressNotice?.setMessage("Gemini retrying with segmented transcript…");
-
-      const pcmChunks: Uint8Array[] = [];
-      let totalLength = 0;
-      let contextBefore = "";
-
-      for (const chunk of chunks) {
-        let chunkPcm: Uint8Array;
-        try {
-          chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, instructions, contextBefore);
-        } catch (chunkError) {
-          const mappedChunk = this.mapGeminiSdkError(chunkError);
-          if (!instructions || !this.isGeminiTextInsteadOfAudioError(mappedChunk.message)) {
-            throw mappedChunk;
-          }
-
-          // Retry the chunk once without style instructions to keep Gemini in strict TTS mode.
-          chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, "", contextBefore);
-        }
-
-        pcmChunks.push(chunkPcm);
-        totalLength += chunkPcm.length;
-        contextBefore = this.buildGeminiContextWindow(contextBefore, chunk, 2000);
-      }
-
-      const mergedPcm = this.concatChunks(pcmChunks, totalLength);
-      const wavBytes = this.wrapPcm16AsWav(mergedPcm, 24000, 1, 16);
-
-      return {
-        bytes: wavBytes,
-        extension: "wav",
-        mimeType: "audio/wav",
-        model: provider.model,
-        voice: provider.voice,
-      };
+      return this.synthesizeWithGeminiChunked(text, ai, provider, instructions, progressNotice, 900);
     }
+  }
+
+  private async synthesizeWithGeminiChunked(
+    text: string,
+    ai: GoogleGenAI,
+    provider: GeminiProvider,
+    instructions: string,
+    progressNotice?: Notice,
+    chunkSize = 3000,
+  ): Promise<GeneratedAudio> {
+    const chunks = this.splitTextAtParagraphs(text, chunkSize);
+    if (!chunks.length) throw new Error("Gemini: text is empty after splitting.");
+
+    progressNotice?.setMessage("Synthesizing in segments via Gemini…");
+
+    const pcmChunks: Uint8Array[] = [];
+    let totalLength = 0;
+    let contextBefore = "";
+
+    for (const chunk of chunks) {
+      let chunkPcm: Uint8Array;
+      try {
+        chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, instructions, contextBefore);
+      } catch (chunkError) {
+        const mappedChunk = this.mapGeminiSdkError(chunkError);
+        if (!instructions || !this.isGeminiTextInsteadOfAudioError(mappedChunk.message)) {
+          throw mappedChunk;
+        }
+        chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, "", contextBefore);
+      }
+      pcmChunks.push(chunkPcm);
+      totalLength += chunkPcm.length;
+      contextBefore = this.buildGeminiContextWindow(contextBefore, chunk, 2000);
+    }
+
+    const mergedPcm = this.concatChunks(pcmChunks, totalLength);
+    const wavBytes = this.wrapPcm16AsWav(mergedPcm, 24000, 1, 16);
+    return { bytes: wavBytes, extension: "wav", mimeType: "audio/wav", model: provider.model, voice: provider.voice };
   }
 
   private async requestGeminiPcm(
@@ -2124,6 +2130,10 @@ export default class NoteTtsAudioPlugin extends Plugin {
     );
   }
 
+  private isGeminiMissingAudioError(message: string): boolean {
+    return message.includes("missing audio data");
+  }
+
   private splitTextAtSentences(text: string, maxChunkSize: number): string[] {
     const cleaned = text.trim();
     if (!cleaned) {
@@ -2184,6 +2194,41 @@ export default class NoteTtsAudioPlugin extends Plugin {
       }
     }
 
+    return chunks;
+  }
+
+  private splitTextAtParagraphs(text: string, maxChunkSize: number): string[] {
+    const cleaned = text.trim();
+    if (!cleaned) return [];
+
+    const paragraphs = cleaned
+      .split(/\n\s*\n/g)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
+    const chunks: string[] = [];
+    let current = "";
+
+    for (const paragraph of paragraphs) {
+      if (paragraph.length > maxChunkSize) {
+        if (current) {
+          chunks.push(current);
+          current = "";
+        }
+        chunks.push(...this.splitTextAtSentences(paragraph, maxChunkSize));
+        continue;
+      }
+
+      const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
+      if (candidate.length <= maxChunkSize) {
+        current = candidate;
+      } else {
+        if (current) chunks.push(current);
+        current = paragraph;
+      }
+    }
+
+    if (current) chunks.push(current);
     return chunks;
   }
 

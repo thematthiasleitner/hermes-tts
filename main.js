@@ -36698,6 +36698,10 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
   async synthesizeWithGemini(text, provider, progressNotice) {
     const ai = new GoogleGenAI({ apiKey: provider.apiKey });
     const instructions = this.getVoicePrompt();
+    const GEMINI_CHUNK_LIMIT = 5e3;
+    if (text.length > GEMINI_CHUNK_LIMIT) {
+      return this.synthesizeWithGeminiChunked(text, ai, provider, instructions, progressNotice);
+    }
     try {
       const pcmBytes = await this.requestGeminiPcm(ai, provider, text, instructions);
       const wavBytes = this.wrapPcm16AsWav(pcmBytes, 24e3, 1, 16);
@@ -36710,42 +36714,37 @@ var NoteTtsAudioPlugin = class extends import_obsidian.Plugin {
       };
     } catch (error) {
       const mapped = this.mapGeminiSdkError(error);
-      if (!this.isGeminiTextInsteadOfAudioError(mapped.message)) {
-        throw mapped;
-      }
-      const chunks = this.splitTextAtSentences(text, 900);
-      if (!chunks.length) {
-        throw mapped;
-      }
+      const shouldChunk = this.isGeminiTextInsteadOfAudioError(mapped.message) || this.isGeminiMissingAudioError(mapped.message);
+      if (!shouldChunk) throw mapped;
       progressNotice == null ? void 0 : progressNotice.setMessage("Gemini retrying with segmented transcript\u2026");
-      const pcmChunks = [];
-      let totalLength = 0;
-      let contextBefore = "";
-      for (const chunk of chunks) {
-        let chunkPcm;
-        try {
-          chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, instructions, contextBefore);
-        } catch (chunkError) {
-          const mappedChunk = this.mapGeminiSdkError(chunkError);
-          if (!instructions || !this.isGeminiTextInsteadOfAudioError(mappedChunk.message)) {
-            throw mappedChunk;
-          }
-          chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, "", contextBefore);
-        }
-        pcmChunks.push(chunkPcm);
-        totalLength += chunkPcm.length;
-        contextBefore = this.buildGeminiContextWindow(contextBefore, chunk, 2e3);
-      }
-      const mergedPcm = this.concatChunks(pcmChunks, totalLength);
-      const wavBytes = this.wrapPcm16AsWav(mergedPcm, 24e3, 1, 16);
-      return {
-        bytes: wavBytes,
-        extension: "wav",
-        mimeType: "audio/wav",
-        model: provider.model,
-        voice: provider.voice
-      };
+      return this.synthesizeWithGeminiChunked(text, ai, provider, instructions, progressNotice, 900);
     }
+  }
+  async synthesizeWithGeminiChunked(text, ai, provider, instructions, progressNotice, chunkSize = 3e3) {
+    const chunks = this.splitTextAtParagraphs(text, chunkSize);
+    if (!chunks.length) throw new Error("Gemini: text is empty after splitting.");
+    progressNotice == null ? void 0 : progressNotice.setMessage("Synthesizing in segments via Gemini\u2026");
+    const pcmChunks = [];
+    let totalLength = 0;
+    let contextBefore = "";
+    for (const chunk of chunks) {
+      let chunkPcm;
+      try {
+        chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, instructions, contextBefore);
+      } catch (chunkError) {
+        const mappedChunk = this.mapGeminiSdkError(chunkError);
+        if (!instructions || !this.isGeminiTextInsteadOfAudioError(mappedChunk.message)) {
+          throw mappedChunk;
+        }
+        chunkPcm = await this.requestGeminiPcm(ai, provider, chunk, "", contextBefore);
+      }
+      pcmChunks.push(chunkPcm);
+      totalLength += chunkPcm.length;
+      contextBefore = this.buildGeminiContextWindow(contextBefore, chunk, 2e3);
+    }
+    const mergedPcm = this.concatChunks(pcmChunks, totalLength);
+    const wavBytes = this.wrapPcm16AsWav(mergedPcm, 24e3, 1, 16);
+    return { bytes: wavBytes, extension: "wav", mimeType: "audio/wav", model: provider.model, voice: provider.voice };
   }
   async requestGeminiPcm(ai, provider, text, voicePrompt, textBefore = "") {
     var _a3, _b, _c2, _d, _e3;
@@ -37176,6 +37175,9 @@ ${transcript}`);
     const normalized = message.toLowerCase();
     return normalized.includes("model tried to generate text") || normalized.includes("only be used for tts") || normalized.includes("only generate audio");
   }
+  isGeminiMissingAudioError(message) {
+    return message.includes("missing audio data");
+  }
   splitTextAtSentences(text, maxChunkSize) {
     var _a3, _b;
     const cleaned = text.trim();
@@ -37222,6 +37224,34 @@ ${transcript}`);
         chunks.push(current);
       }
     }
+    return chunks;
+  }
+  splitTextAtParagraphs(text, maxChunkSize) {
+    const cleaned = text.trim();
+    if (!cleaned) return [];
+    const paragraphs = cleaned.split(/\n\s*\n/g).map((p3) => p3.trim()).filter((p3) => p3.length > 0);
+    const chunks = [];
+    let current = "";
+    for (const paragraph of paragraphs) {
+      if (paragraph.length > maxChunkSize) {
+        if (current) {
+          chunks.push(current);
+          current = "";
+        }
+        chunks.push(...this.splitTextAtSentences(paragraph, maxChunkSize));
+        continue;
+      }
+      const candidate = current ? `${current}
+
+${paragraph}` : paragraph;
+      if (candidate.length <= maxChunkSize) {
+        current = candidate;
+      } else {
+        if (current) chunks.push(current);
+        current = paragraph;
+      }
+    }
+    if (current) chunks.push(current);
     return chunks;
   }
   buildGeminiContextWindow(existing, nextChunk, maxChars) {
